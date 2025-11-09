@@ -2,3 +2,5 @@ streamlit
 kiteconnect
 pandas
 numpy
+requests
+apscheduler
