@@ -475,7 +475,8 @@ if st.sidebar.button("Generate & Save Access Token"):
         try:
             temp = KiteConnect(api_key=api_key)
             data = temp.generate_session(request_token, api_secret=api_secret)
-            json.dump(data, defualt=str)
+            json.dumps(data, default=str)
+
             st.sidebar.success("Access token saved to access_token.json")
             saved_access = data
         except Exception as e:
