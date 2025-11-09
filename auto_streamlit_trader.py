@@ -248,7 +248,7 @@ if st.sidebar.button("Generate & Save Access Token"):
             data = kite_temp.generate_session(request_token, api_secret=api_secret)
             json.dumps(data, default=str)
 
-            json.dump(data, open(ACCESS_TOKEN_FILE,'w'))
+        
             st.sidebar.success("Access token saved to access_token.json")
         except Exception as e:
             st.sidebar.error(f"Failed to generate session: {e}")
