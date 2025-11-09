@@ -460,36 +460,64 @@ def send_sms(message):
     except Exception as e:
         logger.add(f"SMS send failed: {e}")
         return False
+        # P&L COLOR DISPLAY
+        pnl = (ltp - entry_price) * (exposure / entry_price) if position_open else 0
+        color = "green" if pnl > 0 else "red" if pnl < 0 else "blue"
+        html = f"<h2 style='color:{color};'>Live P&L: ₹{pnl:.2f}</h2>"
+        placeholder.markdown(html, unsafe_allow_html=True)
+        time.sleep(5)
 
-# ------------------------
-# P&L helper
-# ------------------------
-def get_live_pnl(kite=None, broker=None, live=False):
-    total = 0.0
-    rows = []
+    send_sms(f"📊 Final P&L for {symbol}: ₹{pnl:.2f}")
+
+# ===============================================================
+# P&L DASHBOARD
+# ===============================================================
+st.markdown("---")
+st.subheader("💹 Live P&L Dashboard")
+
+if st.button("🔄 Refresh P&L"):
     try:
-        if live and kite:
-            data = kite.positions()
-            net = data.get('net', []) if isinstance(data, dict) else []
-            for p in net:
-                sym = p.get('tradingsymbol')
-                qty = int(p.get('quantity', 0) or 0)
-                pnl = float(p.get('pnl', 0) or 0)
-                avg = float(p.get('avg_price', 0) or 0)
-                total += pnl
-                rows.append({'Symbol': sym, 'Qty': qty, 'Avg': avg, 'PnL': round(pnl,2)})
+        positions = kite.positions()
+        net_positions = positions.get("net", [])
+        if not net_positions:
+            st.info("No open positions.")
         else:
-            if broker:
-                pos = broker.get_positions()
-                for p in pos:
-                    sym = p.get('tradingsymbol') or p.get('symbol')
-                    qty = int(p.get('quantity', 0) or 0)
-                    pnl = float(p.get('pnl', 0) or 0)
-                    total += pnl
-                    rows.append({'Symbol': sym, 'Qty': qty, 'Avg': p.get('avg_price',0), 'PnL': round(pnl,2)})
+            df = pd.DataFrame(net_positions)
+            df = df[["tradingsymbol", "quantity", "average_price", "last_price", "pnl"]]
+            df["pnl"] = df["pnl"].astype(float)
+            st.dataframe(df, use_container_width=True)
+            total_pnl = df["pnl"].sum()
+            color = "green" if total_pnl > 0 else "red" if total_pnl < 0 else "blue"
+            st.markdown(f"<h3 style='color:{color};'>Total P&L: ₹{total_pnl:.2f}</h3>", unsafe_allow_html=True)
     except Exception as e:
-        logger.add(f"P&L fetch error: {e}")
-    return total, rows
+        st.error(f"Error fetching P&L: {e}")
+✅ What’s new
+Instant Stop-Loss trigger
+→ As soon as LTP falls below entry × (1 − SL%), the order is sold immediately, even seconds after entry.
+
+Live color-coded P&L (Green/Red/Blue)
+
+SMS alerts for all events (Buy, SL, Trailing SL, Square-off)
+
+Auto square-off at 15:15 PM
+
+Would you like me to make the instant SL configurable (for example, a separate % only for the first candle or first x seconds after entry)?
+
+
+
+
+
+
+
+
+
+
+
+
+
+ChatGPT can make mistakes. Check important info. See Cookie Preferences.
+
+
 
 # ------------------------
 # STREAMLIT UI
