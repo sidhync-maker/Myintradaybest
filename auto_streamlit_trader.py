@@ -21,13 +21,13 @@ REDIRECT_URL = os.getenv("REDIRECT_URL", "http://localhost:8501")
 ACCESS_TOKEN_FILE = os.getenv("ACCESS_TOKEN_FILE", "access_token.txt")
 
 # Zerodha login credentials (HIGHLY SENSITIVE) - store as env vars
-ZERODHA_USERID = os.getenv("ZERODHA_USERID", "")
-ZERODHA_PASSWORD = os.getenv("ZERODHA_PASSWORD", "")
+ZERODHA_USERID = os.getenv("ZERODHA_USERID", "Aboobaker")
+ZERODHA_PASSWORD = os.getenv("ZERODHA_PASSWORD", "123143@Ab")
 ZERODHA_PIN = os.getenv("ZERODHA_PIN", "")  # optional; if not present and needed, automation may fail
 
 # Fast2SMS (or replace with Twilio) credentials
 FAST2SMS_API = os.getenv("FAST2SMS_API", "")   # required for SMS alerts
-USER_PHONE = os.getenv("USER_PHONE", "")       # e.g. "919876543210"
+USER_PHONE = os.getenv("USER_PHONE", "918301844858")       # e.g. "919876543210"
 
 # Chromedriver path (optional). If not set, chromedriver must be in PATH
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", None)
