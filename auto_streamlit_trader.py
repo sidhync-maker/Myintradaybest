@@ -35,16 +35,16 @@ except Exception:
 # CONFIG (edit / use env vars)
 # ------------------------
 # Zerodha app credentials (do not hardcode in production; prefer env vars)
-API_KEY = os.getenv("ZK_API_KEY", "")      # e.g., "t32mq..."
-API_SECRET = os.getenv("ZK_API_SECRET", "")  # e.g., "xf9jf..."
+API_KEY = os.getenv("ZK_API_KEY", "t32mq5t5xgnjdtni")      # e.g., "t32mq..."
+API_SECRET = os.getenv("ZK_API_SECRET", "xf9jfyfvmqo408m52l4u2gpyo34fcsfe")  # e.g., "xf9jf..."
 REDIRECT_URL = os.getenv("ZK_REDIRECT_URL", "http://localhost:8501")
 
 # Access token storage (JSON contains kite.generate_session() output)
 ACCESS_TOKEN_FILE = os.getenv("ACCESS_TOKEN_FILE", "access_token.json")
 
 # SMS (Fast2SMS) config
-FAST2SMS_API_KEY = os.getenv("FAST2SMS_API_KEY", "")  # put your Fast2SMS key or leave blank to disable SMS
-USER_PHONE = os.getenv("USER_PHONE", "")  # e.g., "919876543210"
+FAST2SMS_API_KEY = os.getenv("FAST2SMS_API_KEY", "o0EQRX69hWSDnCP2awiTtxvdFMeAZLOgUj1slcNbBrqf3z4GIJBVfSov8laJ7eET160iZCOrHbchKI4G")  # put your Fast2SMS key or leave blank to disable SMS
+USER_PHONE = os.getenv("USER_PHONE", "918301844858")  # e.g., "919876543210"
 FAST2SMS_URL = "https://www.fast2sms.com/dev/bulkV2"
 
 # Defaults for trading
