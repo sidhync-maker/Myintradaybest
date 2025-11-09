@@ -491,31 +491,7 @@ if st.button("🔄 Refresh P&L"):
             st.markdown(f"<h3 style='color:{color};'>Total P&L: ₹{total_pnl:.2f}</h3>", unsafe_allow_html=True)
     except Exception as e:
         st.error(f"Error fetching P&L: {e}")
-     Instant Stop-Loss trigger
-→ As soon as LTP falls below entry × (1 − SL%), the order is sold immediately, even seconds after entry.
-
-Live color-coded P&L (Green/Red/Blue)
-
-SMS alerts for all events (Buy, SL, Trailing SL, Square-off)
-
-Auto square-off at 15:15 PM
-
-Would you like me to make the instant SL configurable (for example, a separate % only for the first candle or first x seconds after entry)?
-
-
-
-
-
-
-
-
-
-
-
-
-
-ChatGPT can make mistakes. Check important info. See Cookie Preferences.
-
+     
 
 
 # ------------------------
