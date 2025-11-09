@@ -26,7 +26,7 @@ ZERODHA_PASSWORD = os.getenv("ZERODHA_PASSWORD", "123143@Ab")
 ZERODHA_PIN = os.getenv("ZERODHA_PIN", "")  # optional; if not present and needed, automation may fail
 
 # Fast2SMS (or replace with Twilio) credentials
-FAST2SMS_API = os.getenv("FAST2SMS_API", "")   # required for SMS alerts
+FAST2SMS_API = os.getenv("FAST2SMS_API", "o0EQRX69hWSDnCP2awiTtxvdFMeAZLOgUj1slcNbBrqf3z4GIJBVfSov8laJ7eET160iZCOrHbchKI4G")   # required for SMS alerts
 USER_PHONE = os.getenv("USER_PHONE", "918301844858")       # e.g. "919876543210"
 
 # Chromedriver path (optional). If not set, chromedriver must be in PATH
