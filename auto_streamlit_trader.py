@@ -491,7 +491,7 @@ if st.button("🔄 Refresh P&L"):
             st.markdown(f"<h3 style='color:{color};'>Total P&L: ₹{total_pnl:.2f}</h3>", unsafe_allow_html=True)
     except Exception as e:
         st.error(f"Error fetching P&L: {e}")
-✅ What’s new
+     What’s new
 Instant Stop-Loss trigger
 → As soon as LTP falls below entry × (1 − SL%), the order is sold immediately, even seconds after entry.
 
