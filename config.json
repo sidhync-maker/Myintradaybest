@@ -1,0 +1,7 @@
+{
+  "default_mode": "paper",
+  "default_exposure": 50000,
+  "default_leverage": 5,
+  "default_qty": 1000,
+  "nifty_token": "256265"
+}
