@@ -1,10 +1,11 @@
-# auto_streamlit_final.py
-# Fully automated Streamlit + Zerodha intraday trader
-# - Manual symbol entry
-# - Live & Paper modes
-# - Auto 09:15 entry, SL/Trailing, 15:15 square-off
-# - Cancel all pending orders & close all positions on SL or time exit
-# - Live P&L display and logs
+# auto_streamlit_trader_fixed.py
+# Fully fixed Streamlit + Zerodha intraday trader (auto token handling + paper/live modes)
+# - Auto 09:15 entry (market bullish + stock uptrend)
+# - Initial SL %, trailing logic (1:3 -> breakeven -> trail by TRAIL_PCT)
+# - Emergency exit: cancel all pending orders + close all positions
+# - Auto day-end square-off at 15:15
+# - Live P&L display
+# - Safe token json handling (no JSONDecodeError)
 
 import streamlit as st
 import pandas as pd
@@ -19,24 +20,41 @@ try:
 except Exception:
     KiteConnect = None
 
-# ----------------- CONFIG DEFAULTS -----------------
-DEFAULT_NIFTY_TOKEN = "256265"   # change if you use a different token
-DEFAULT_SL_PCT = 1.0             # initial stop loss percent
-TRIGGER_MULTIPLIER = 3.0         # 1:3 -> when profit >= SL*3 we move SL to breakeven
-TRAIL_PCT = 3.0                  # trailing percent (off peak)
+# -------------------- CONFIG DEFAULTS --------------------
+ACCESS_TOKEN_FILE = "access_token.json"   # file to persist Kite session dict
+DEFAULT_NIFTY_TOKEN = "256265"
+DEFAULT_SL_PCT = 1.0
+TRIGGER_MULTIPLIER = 3.0       # When profit >= SL * TRIGGER_MULTIPLIER -> move to breakeven
+TRAIL_PCT = 3.0                # trailing percent off the peak after breakeven
 DEFAULT_EXPOSURE = 50000
 DEFAULT_LEVERAGE = 5
 
-ACCESS_TOKEN_FILE = "access_token.json"
+# -------------------- UTILITIES --------------------
+def safe_load_json(path):
+    """Load JSON safely; return None if missing or invalid."""
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            with open(path, "r") as f:
+                return json.load(f)
+    except Exception:
+        return None
+    return None
 
-# ----------------- SIMPLE LOGGER -----------------
+def safe_save_json(path, data):
+    """Save JSON safely (atomic-ish)."""
+    with open(path, "w") as f:
+        json.dump(data, f, default=str, indent=2)
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# -------------------- LOGGER --------------------
 class SimpleLogger:
-    def __init__(self, maxlen=500):
+    def __init__(self, maxlen=1000):
         self.logs = []
         self.maxlen = maxlen
     def add(self, msg):
-        t = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        s = f"[{t}] {msg}"
+        s = f"[{now_str()}] {msg}"
         self.logs.append(s)
         if len(self.logs) > self.maxlen:
             self.logs.pop(0)
@@ -45,43 +63,47 @@ class SimpleLogger:
 
 logger = SimpleLogger()
 
-# ----------------- PAPER BROKER (SIMULATION) -----------------
+# -------------------- PAPER BROKER (SIMULATION) --------------------
 class PaperBroker:
     def __init__(self):
-        self.orders = {}  # simple store: id -> order dict
-        self.positions = {}  # symbol -> net qty, avg price
+        self.orders = {}       # order_id -> order dict
+        self.positions = {}    # symbol -> {'qty': int, 'avg': float}
         self._next = 1
-    def _next_id(self):
+
+    def _id(self):
         oid = f"P{self._next}"
         self._next += 1
         return oid
+
     def place_market_buy(self, symbol, qty, price=None):
-        oid = self._next_id()
-        # simulate fill at price or dummy
-        fill_price = price if price else (self.positions.get(symbol, {}).get('avg', 100.0))
-        self.orders[oid] = {'id': oid, 'type': 'BUY', 'symbol': symbol, 'qty': qty, 'price': fill_price, 'status': 'FILLED'}
+        oid = self._id()
+        fill_price = price if price is not None else (self.positions.get(symbol, {}).get('avg', 100.0))
+        self.orders[oid] = {'id': oid, 'type': 'BUY', 'symbol': symbol, 'qty': qty, 'price': fill_price, 'status': 'FILLED', 'ts': now_str()}
         # update position
-        pos = self.positions.get(symbol, {'qty':0, 'avg':0.0})
+        pos = self.positions.get(symbol, {'qty': 0, 'avg': 0.0})
         total_qty = pos['qty'] + qty
         if pos['qty'] == 0:
             pos['avg'] = fill_price
         else:
-            pos['avg'] = (pos['avg']*pos['qty'] + fill_price*qty) / total_qty
+            pos['avg'] = (pos['avg'] * pos['qty'] + fill_price * qty) / total_qty
         pos['qty'] = total_qty
         self.positions[symbol] = pos
-        logger.add(f"[Paper] BUY filled {symbol} qty {qty} @ {fill_price} (id {oid})")
+        logger.add(f"[Paper] BUY filled {symbol} qty={qty} @ {fill_price} (id={oid})")
         return oid
+
     def place_slm(self, symbol, qty, trigger):
-        oid = self._next_id()
-        self.orders[oid] = {'id': oid, 'type': 'SLM', 'symbol': symbol, 'qty': qty, 'trigger': trigger, 'status': 'ACTIVE'}
-        logger.add(f"[Paper] SLM placed {symbol} qty {qty} trigger {trigger} (id {oid})")
+        oid = self._id()
+        self.orders[oid] = {'id': oid, 'type': 'SLM', 'symbol': symbol, 'qty': qty, 'trigger': trigger, 'status': 'ACTIVE', 'ts': now_str()}
+        logger.add(f"[Paper] SLM placed {symbol} qty={qty} trigger={trigger} (id={oid})")
         return oid
+
     def modify_order(self, oid, trigger):
         if oid in self.orders:
             self.orders[oid]['trigger'] = trigger
-            logger.add(f"[Paper] Order {oid} modified trigger->{trigger}")
+            logger.add(f"[Paper] Order {oid} modified -> trigger {trigger}")
             return True
         return False
+
     def cancel_all(self):
         cancelled = []
         for oid, o in list(self.orders.items()):
@@ -90,26 +112,25 @@ class PaperBroker:
                 cancelled.append(oid)
         logger.add(f"[Paper] Cancelled orders: {cancelled}")
         return cancelled
+
     def close_all_positions(self):
         closed = []
-        for sym, pos in list(self.positions.items()):
-            qty = pos.get('qty',0)
-            if qty == 0:
-                continue
-            # simulate market close at avg (no PnL calc here)
-            closed.append({'symbol': sym, 'qty': qty})
-            logger.add(f"[Paper] Closed {sym} qty {qty}")
-            self.positions[sym] = {'qty':0, 'avg':0.0}
+        for sym, p in list(self.positions.items()):
+            if p.get('qty', 0) != 0:
+                qty = p['qty']
+                closed.append({'symbol': sym, 'qty': qty})
+                logger.add(f"[Paper] Closed {sym} qty={qty}")
+                self.positions[sym] = {'qty': 0, 'avg': 0.0}
         return closed
+
     def get_positions(self):
-        # return list similar to kite.positions()['net']
         res = []
         for sym, p in self.positions.items():
             if p['qty'] != 0:
-                res.append({'tradingsymbol': sym, 'exchange': 'NSE', 'quantity': p['qty'], 'pnl': 0.0, 'avg_price': p['avg']})
+                res.append({'tradingsymbol': sym, 'exchange': 'NSE', 'quantity': p['qty'], 'avg_price': p['avg'], 'pnl': 0.0})
         return res
 
-# ----------------- TRADING ENGINE -----------------
+# -------------------- TRADING ENGINE --------------------
 class TradingEngine:
     def __init__(self, kite=None, broker=None, live=False, config=None):
         self.kite = kite
@@ -124,13 +145,11 @@ class TradingEngine:
         self.active = False
         self._stop = threading.Event()
 
-    # --- helpers ---
     def compute_qty(self, ltp):
         if self.config.get('qty_mode') == 'fixed':
             return int(self.config.get('qty', 1000))
-        # exposure mode
-        exposure = self.config.get('exposure', DEFAULT_EXPOSURE)
-        leverage = self.config.get('leverage', DEFAULT_LEVERAGE)
+        exposure = float(self.config.get('exposure', DEFAULT_EXPOSURE))
+        leverage = float(self.config.get('leverage', DEFAULT_LEVERAGE))
         if ltp <= 0:
             return 0
         qty = int((exposure * leverage) // ltp)
@@ -142,7 +161,7 @@ class TradingEngine:
                 data = self.kite.historical_data(int(token), datetime.now() - timedelta(days=days), datetime.now(), interval)
                 return pd.DataFrame(data)
             except Exception as e:
-                logger.add(f"OHLC fetch failed: {e}")
+                logger.add(f"[Live] OHLC fetch failed: {e}")
                 return pd.DataFrame()
         return pd.DataFrame()
 
@@ -151,18 +170,16 @@ class TradingEngine:
             try:
                 ref = f"{exchange}:{symbol}"
                 d = self.kite.ltp(ref)
-                price = list(d.values())[0]['last_price']
-                return price
+                return list(d.values())[0]['last_price']
             except Exception as e:
-                logger.add(f"Live LTP fetch failed: {e}")
+                logger.add(f"[Live] LTP fetch failed: {e}")
                 return None
-        # paper mode simulate
+        # paper simulate
         if self.entry_price:
-            # slight random walk around peak/entry
             return round(self.entry_price * (1 + np.random.normal(0, 0.0015)), 2)
         return None
 
-    # --- order / position operations ---
+    # Order placement wrappers
     def place_market_buy(self, symbol, exchange, qty):
         if self.live and self.kite:
             try:
@@ -175,7 +192,7 @@ class TradingEngine:
                     product=self.kite.PRODUCT_MIS,
                     variety=self.kite.VARIETY_REGULAR
                 )
-                logger.add(f"[Live] Market BUY order placed id={oid} qty={qty}")
+                logger.add(f"[Live] Market BUY placed (id={oid}) qty={qty}")
                 return oid
             except Exception as e:
                 logger.add(f"[Live] Market buy failed: {e}")
@@ -196,7 +213,7 @@ class TradingEngine:
                     product=self.kite.PRODUCT_MIS,
                     variety=self.kite.VARIETY_REGULAR
                 )
-                logger.add(f"[Live] SLM placed id={oid} trigger={trigger_price}")
+                logger.add(f"[Live] SLM placed (id={oid}) trigger={trigger_price}")
                 return oid
             except Exception as e:
                 logger.add(f"[Live] SL placement failed: {e}")
@@ -216,7 +233,7 @@ class TradingEngine:
         else:
             return self.broker.modify_order(order_id, trigger_price)
 
-    # --- cancel & close utilities ---
+    # Cancel + Close
     def cancel_all_pending_orders(self):
         cancelled = []
         if self.live and self.kite:
@@ -231,7 +248,7 @@ class TradingEngine:
                             self.kite.cancel_order(order_id=oid, variety=variety)
                             cancelled.append(oid)
                         except Exception as e:
-                            logger.add(f"Failed to cancel {oid}: {e}")
+                            logger.add(f"[Live] Failed to cancel {oid}: {e}")
                 logger.add(f"[Live] Cancelled pending orders: {cancelled}")
             except Exception as e:
                 logger.add(f"[Live] Cancel all failed: {e}")
@@ -268,7 +285,7 @@ class TradingEngine:
                         )
                         closed.append({'symbol': tradingsymbol, 'qty': qty, 'order_id': order})
                     except Exception as e:
-                        logger.add(f"Failed to close {tradingsymbol}: {e}")
+                        logger.add(f"[Live] Failed to close {tradingsymbol}: {e}")
                 logger.add(f"[Live] Close orders placed: {closed}")
             except Exception as e:
                 logger.add(f"[Live] Close all failed: {e}")
@@ -276,9 +293,8 @@ class TradingEngine:
             closed = self.broker.close_all_positions()
         return closed
 
-    # --- emergency exit (cancel + close + stop) ---
     def emergency_exit(self, reason="emergency"):
-        logger.add(f"Emergency exit triggered: {reason}")
+        logger.add(f"Emergency exit: {reason}")
         try:
             self.cancel_all_pending_orders()
             self.close_all_open_positions()
@@ -286,135 +302,119 @@ class TradingEngine:
             logger.add(f"Error during emergency exit: {e}")
         self.stop()
         self.active = False
-        logger.add("Engine stopped for the day after emergency exit.")
+        logger.add("Engine stopped after emergency exit")
 
-    # --- entry evaluation and placement ---
+    # Entry and trailing
     def evaluate_and_place_entry(self):
         cfg = self.config
-        # need instrument tokens for historical checks (nifty token and symbol token)
         try:
             nifty_token = cfg.get('nifty_token', DEFAULT_NIFTY_TOKEN)
             symbol_token = cfg.get('symbol_token')
-            if not symbol_token and self.live:
-                logger.add("Symbol token required for OHLC checks in live mode. Skipping entry.")
+            if self.live and (not symbol_token):
+                logger.add("Symbol token needed for live OHLC checks. Provide it or disable live checks.")
                 return False
-            nifty_df = self.get_ohlc(nifty_token, '5minute', days=1) if self.live else pd.DataFrame()
-            stock_df = self.get_ohlc(symbol_token, '5minute', days=1) if self.live else pd.DataFrame()
+            # fetch OHLC only in live mode (paper uses simulation)
             if self.live:
+                nifty_df = self.get_ohlc(nifty_token, '5minute', days=1)
+                stock_df = self.get_ohlc(symbol_token, '5minute', days=1)
                 if nifty_df.empty or stock_df.empty:
-                    logger.add("OHLC data unavailable; aborting entry evaluation.")
+                    logger.add("OHLC missing; abort entry.")
                     return False
-                # evaluate bullish & uptrend
                 nifty_df['sma20'] = nifty_df['close'].rolling(20).mean()
                 nifty_df['sma50'] = nifty_df['close'].rolling(50).mean()
                 if nifty_df['sma20'].iloc[-1] <= nifty_df['sma50'].iloc[-1]:
-                    logger.add("Market not bullish; skipping entry.")
+                    logger.add("Market not bullish; skipping entry")
                     return False
                 stock_df['sma50'] = stock_df['close'].rolling(50).mean()
                 if stock_df['close'].iloc[-1] <= stock_df['sma50'].iloc[-1]:
-                    logger.add("Stock not in uptrend; skipping entry.")
+                    logger.add("Stock not in uptrend; skipping entry")
                     return False
                 ltp = stock_df['close'].iloc[-1]
             else:
-                # paper: simulate an LTP from config or default
                 ltp = cfg.get('sim_ltp', 100.0)
             qty = self.compute_qty(ltp)
             if qty <= 0:
-                logger.add("Computed qty <= 0; aborting entry.")
+                logger.add("Computed qty <= 0; abort")
                 return False
-            # Place market buy
             entry_oid = self.place_market_buy(cfg['tradingsymbol'], cfg['exchange'], qty)
             if not entry_oid:
-                logger.add("Entry placement failed.")
+                logger.add("Entry failed")
                 return False
             self.entry_order_id = entry_oid
             self.entry_price = ltp
             self.qty = qty
             self.peak_price = ltp
-            # place initial SL
             trigger = round(self.entry_price * (1 - cfg['sl_pct']/100), 2)
             sl_oid = self.place_slm(cfg['tradingsymbol'], cfg['exchange'], qty, trigger)
             self.sl_order_id = sl_oid
-            logger.add(f"Entry executed @ {self.entry_price} qty {self.qty}; initial SL @ {trigger}")
+            logger.add(f"Entry executed @ {self.entry_price} qty={self.qty} sl={trigger}")
             return True
         except Exception as e:
             logger.add(f"Entry exception: {e}")
             return False
 
-    # --- trailing management ---
     def manage_trailing(self):
         if not self.entry_price:
             return
         ltp = self.get_ltp(self.config['exchange'], self.config['tradingsymbol'])
         if ltp is None:
             return
-        # update peak price
         if self.peak_price is None or ltp > self.peak_price:
             self.peak_price = ltp
-        # check initial SL hit
+        # initial SL hit?
         if ltp <= self.entry_price * (1 - self.config['sl_pct']/100):
-            logger.add("Price hit initial SL level — executing emergency exit.")
+            logger.add("Initial SL hit -> emergency exit")
             self.emergency_exit(reason="SL hit")
             return
-        # profit percent relative to entry
         profit_pct = (ltp - self.entry_price) / self.entry_price * 100
         if profit_pct >= (self.config['sl_pct'] * TRIGGER_MULTIPLIER):
-            # move SL to breakeven (entry price) first, then trail by TRAIL_PCT off peak
-            new_trigger = round(self.entry_price, 2)
+            # move SL to breakeven
+            breakeven = round(self.entry_price, 2)
             if self.sl_order_id:
-                self.modify_slm(self.sl_order_id, new_trigger)
-                logger.add(f"Moved SL to breakeven @ {new_trigger}")
-        # compute trailing trigger based on peak
+                self.modify_slm(self.sl_order_id, breakeven)
+                logger.add(f"Moved SL to breakeven @ {breakeven}")
+        # trailing using peak
         trailing_trigger = round(self.peak_price * (1 - TRAIL_PCT/100), 2)
-        # Only raise SL if trailing_trigger is higher than current SL trigger
         if self.sl_order_id:
             try:
                 self.modify_slm(self.sl_order_id, trailing_trigger)
-                logger.add(f"Attempted trailing SL -> {trailing_trigger} (peak {self.peak_price})")
+                logger.add(f"Updated trailing SL -> {trailing_trigger} (peak {self.peak_price})")
             except Exception as e:
-                logger.add(f"Trailing modify exception: {e}")
+                logger.add(f"Trailing modify error: {e}")
 
-    # --- main loop ---
     def run_forever(self):
-        logger.add("Engine loop starting")
+        logger.add("Engine loop started")
         self.active = True
         self._stop.clear()
         while not self._stop.is_set():
             try:
                 now = datetime.now()
-                # weekends skip
                 if now.weekday() >= 5:
                     time.sleep(10)
                     continue
-                # if not entered yet, wait for 09:15 trigger
                 if not self.entry_price:
                     if now.hour == 9 and now.minute == 15 and now.second < 10:
-                        logger.add("09:15 reached -> evaluating entry")
+                        logger.add("09:15 -> evaluating entry")
                         self.evaluate_and_place_entry()
                 else:
-                    # manage trailing and detect SL
                     self.manage_trailing()
-                # day-end square off at >=15:15
+                # day-end square-off >= 15:15
                 if now.hour == 15 and now.minute >= 15:
-                    logger.add("15:15 reached -> performing day-end square-off")
+                    logger.add("15:15 reached -> day-end square-off")
                     self.emergency_exit(reason="Time 15:15")
                     break
             except Exception as e:
-                logger.add(f"Engine loop exception: {e}")
+                logger.add(f"Engine loop error: {e}")
             time.sleep(3)
         logger.add("Engine loop ended")
         self.active = False
 
     def stop(self):
         self._stop.set()
-        logger.add("Engine stop requested (thread)")
+        logger.add("Engine stop requested")
 
-# ----------------- P&L & Status Helpers -----------------
+# -------------------- P&L helper --------------------
 def get_live_pnl(kite=None, broker=None, live=False):
-    """
-    Returns total_pnl (float) and a list of position dicts for display.
-    For live, uses kite.positions(); for paper, uses broker state.
-    """
     total_pnl = 0.0
     pnl_list = []
     try:
@@ -430,59 +430,78 @@ def get_live_pnl(kite=None, broker=None, live=False):
                 pnl_list.append({'Symbol': symbol, 'Qty': qty, 'Avg': avg, 'PnL': round(pnl,2)})
         else:
             if broker:
-                positions = broker.get_positions()
-                for p in positions:
+                pos = broker.get_positions()
+                for p in pos:
                     symbol = p.get('tradingsymbol') or p.get('symbol')
                     qty = int(p.get('quantity', 0) or 0)
                     pnl = float(p.get('pnl', 0) or 0)
                     total_pnl += pnl
-                    pnl_list.append({'Symbol': symbol, 'Qty': qty, 'Avg': p.get('avg_price', 0), 'PnL': round(pnl, 2)})
+                    pnl_list.append({'Symbol': symbol, 'Qty': qty, 'Avg': p.get('avg_price', 0), 'PnL': round(pnl,2)})
     except Exception as e:
         logger.add(f"P&L fetch error: {e}")
     return total_pnl, pnl_list
 
-# ----------------- STREAMLIT UI -----------------
-st.set_page_config(page_title="Auto Trader Final", layout="wide")
-st.title("🔁 Auto Streamlit Trader — Final (Auto 09:15, SL/Trail, 15:15 Square-off)")
+# -------------------- STREAMLIT UI --------------------
+st.set_page_config(page_title="Auto Streamlit Trader (fixed)", layout="wide")
+st.title("🔁 Auto Streamlit Trader — Fixed (Auto 09:15, SL/Trail, 15:15)")
 
-# Sidebar: connection & mode
+# Sidebar: connection & token handling
 st.sidebar.header("Connection & Mode")
 live_mode = st.sidebar.checkbox("Live mode (place real orders)", value=False)
 api_key = st.sidebar.text_input("Kite API Key", type="password")
 api_secret = st.sidebar.text_input("Kite API Secret", type="password")
 
-saved_access = None
-if os.path.exists(ACCESS_TOKEN_FILE):
-    try:
-        saved_access = json.load(open(ACCESS_TOKEN_FILE))
-        st.sidebar.success("Found saved access_token.json")
-    except Exception:
-        saved_access = None
+saved_access = safe_load_json(ACCESS_TOKEN_FILE)
+if saved_access:
+    st.sidebar.success("Found saved access token file")
 
 if st.sidebar.button("Show Kite Login URL"):
     if KiteConnect is None or not api_key:
-        st.sidebar.error("kiteconnect missing or API key not provided")
+        st.sidebar.error("kiteconnect not installed or API Key missing")
     else:
         temp = KiteConnect(api_key=api_key)
         st.sidebar.code(temp.login_url())
-        st.sidebar.info("Open link, login with the Zerodha ID that created the app, copy request_token from redirect URL and paste below.")
+        st.sidebar.info("Open the URL, login with the Zerodha ID that created the app, copy request_token from redirect URL, paste below.")
 
 request_token = st.sidebar.text_input("Request token (from Kite login)")
 if st.sidebar.button("Generate & Save Access Token"):
     if KiteConnect is None:
-        st.sidebar.error("kiteconnect not available")
+        st.sidebar.error("kiteconnect library missing")
     else:
-        try:
-            temp = KiteConnect(api_key=api_key)
-            data = temp.generate_session(request_token, api_secret=api_secret)
-            json.dumps(data, default=str)
+        if not api_key or not api_secret or not request_token:
+            st.sidebar.error("Provide API Key, Secret and Request Token")
+        else:
+            try:
+                temp = KiteConnect(api_key=api_key)
+                data = temp.generate_session(request_token, api_secret=api_secret)
+                safe_save_json(ACCESS_TOKEN_FILE, data)
+                saved_access = data
+                st.sidebar.success("Access token saved to access_token.json")
+            except Exception as e:
+                st.sidebar.error(f"Token gen failed: {e}")
+                logger.add(f"Token gen failed: {e}")
 
-            st.sidebar.success("Access token saved to access_token.json")
-            saved_access = data
-        except Exception as e:
-            st.sidebar.error(f"Token gen failed: {e}")
+# Build kite object if live desired and token present
+kite = None
+if live_mode:
+    if KiteConnect is None:
+        st.sidebar.error("kiteconnect missing; live mode disabled")
+        live_mode = False
+    else:
+        access = saved_access or safe_load_json(ACCESS_TOKEN_FILE)
+        if access and api_key:
+            try:
+                kite = KiteConnect(api_key=api_key)
+                kite.set_access_token(access.get('access_token'))
+                st.sidebar.success("Kite connected (from saved token)")
+            except Exception as e:
+                st.sidebar.error(f"Kite connect failed: {e}")
+                logger.add(f"Kite connect failed: {e}")
+                kite = None
+        else:
+            st.sidebar.info("No access token available. Generate one using the login URL and request token.")
 
-# Strategy configuration (main)
+# Main configuration
 st.subheader("Strategy Configuration")
 c1, c2, c3 = st.columns(3)
 with c1:
@@ -500,42 +519,17 @@ with c3:
     auto_mode = st.checkbox("Auto mode (start before 09:15)", value=True)
     allow_manual = st.checkbox("Allow Manual Start/Stop", value=True)
 
-# session objects
+# Session objects
+if 'broker' not in st.session_state:
+    st.session_state['broker'] = PaperBroker()
 if 'engine' not in st.session_state:
     st.session_state['engine'] = None
 if 'engine_thread' not in st.session_state:
     st.session_state['engine_thread'] = None
-if 'kite' not in st.session_state:
-    st.session_state['kite'] = None
-if 'broker' not in st.session_state:
-    st.session_state['broker'] = None
 
-# Build kite object if live mode & token available
-kite = None
-if live_mode:
-    if KiteConnect is None:
-        st.error("kiteconnect library not installed — Live mode disabled.")
-        live_mode = False
-    else:
-        access = saved_access or (json.load(open(ACCESS_TOKEN_FILE)) if os.path.exists(ACCESS_TOKEN_FILE) else None)
-        if access:
-            try:
-                kite = KiteConnect(api_key=api_key)
-                kite.set_access_token(access.get('access_token'))
-                st.sidebar.success("Kite connected (from saved token).")
-                st.session_state['kite'] = kite
-            except Exception as e:
-                st.sidebar.error(f"Kite connect failed: {e}")
-                kite = None
-        else:
-            st.sidebar.info("No access token found. Generate one using the login URL.")
-
-# create paper broker by default
-if st.session_state.get('broker') is None:
-    st.session_state['broker'] = PaperBroker()
 broker = st.session_state['broker']
 
-# config dict
+# create config dict for engine
 config = {
     'tradingsymbol': tradingsymbol,
     'exchange': exchange,
@@ -549,7 +543,7 @@ config = {
     'sim_ltp': 100.0
 }
 
-# engine management functions
+# engine control helpers
 def start_engine():
     if st.session_state.get('engine') is not None:
         logger.add("Engine already running")
@@ -569,29 +563,27 @@ def stop_engine():
     st.session_state['engine_thread'] = None
     logger.add("Engine stopped by user")
 
-# auto scheduler thread
+# auto scheduler to start engine a few minutes before 09:15
 if auto_mode and st.session_state.get('engine') is None:
     def scheduler_loop():
-        logger.add("Auto-scheduler active")
+        logger.add("Auto-scheduler started")
         while True:
-            if datetime.now().weekday() < 5:  # weekdays only
-                now = datetime.now()
-                if st.session_state.get('engine') is None and now.hour == 9 and 10 <= now.minute <= 14:
-                    try:
+            try:
+                if datetime.now().weekday() < 5:
+                    now = datetime.now()
+                    if st.session_state.get('engine') is None and now.hour == 9 and 10 <= now.minute <= 14:
                         start_engine()
-                    except Exception as e:
-                        logger.add(f"Auto-scheduler start error: {e}")
-                if st.session_state.get('engine') is not None and now.hour == 15 and now.minute >= 31:
-                    try:
+                    # stop after market close
+                    if st.session_state.get('engine') is not None and now.hour == 15 and now.minute >= 31:
                         stop_engine()
-                    except Exception as e:
-                        logger.add(f"Auto-scheduler stop error: {e}")
+            except Exception as e:
+                logger.add(f"Scheduler error: {e}")
             time.sleep(20)
     if 'scheduler_thread' not in st.session_state:
         st.session_state['scheduler_thread'] = threading.Thread(target=scheduler_loop, daemon=True)
         st.session_state['scheduler_thread'].start()
 
-# manual start/stop
+# manual controls
 if allow_manual:
     m1, m2, m3 = st.columns([1,1,2])
     if m1.button("Manual Start"):
@@ -599,17 +591,16 @@ if allow_manual:
     if m2.button("Manual Stop"):
         eng = st.session_state.get('engine')
         if eng:
-            eng.emergency_exit(reason="Manual stop requested")
+            eng.emergency_exit(reason="Manual Stop")
             stop_engine()
     if m3.button("🛑 Emergency Exit (Cancel all & Close all)"):
         eng = st.session_state.get('engine')
         if eng:
-            eng.emergency_exit(reason="Manual emergency")
+            eng.emergency_exit(reason="Manual Emergency")
 
-# Dashboard
+# Dashboard & P&L
 st.markdown("---")
 left, right = st.columns([2,1])
-
 with left:
     st.subheader("Engine Status")
     eng = st.session_state.get('engine')
@@ -624,25 +615,24 @@ with left:
 
     st.subheader("Live P&L")
     pnl_placeholder = st.empty()
-    # start a small background updater thread for PnL & logs if not present
+
+    # background PnL updater
     if 'pnl_thread' not in st.session_state:
         def pnl_updater():
             while True:
                 try:
                     eng_local = st.session_state.get('engine')
-                    total_pnl, pnl_list = get_live_pnl(kite=eng_local.kite if eng_local else kite,
-                                                       broker=broker,
-                                                       live=eng_local.live if eng_local else live_mode)
-                    # set in session for UI read
-                    st.session_state['pnl_total'] = total_pnl
-                    st.session_state['pnl_list'] = pnl_list
+                    total, lst = get_live_pnl(kite=eng_local.kite if eng_local else kite,
+                                              broker=broker,
+                                              live=eng_local.live if eng_local else live_mode)
+                    st.session_state['pnl_total'] = total
+                    st.session_state['pnl_list'] = lst
                 except Exception as e:
                     logger.add(f"PnL updater error: {e}")
                 time.sleep(5)
         st.session_state['pnl_thread'] = threading.Thread(target=pnl_updater, daemon=True)
         st.session_state['pnl_thread'].start()
 
-    # display current pnl
     total = st.session_state.get('pnl_total', 0.0)
     color = "green" if total >= 0 else "red"
     pnl_placeholder.markdown(f"<h2 style='text-align:center;color:{color};'>Total P&L: ₹{total:.2f}</h2>", unsafe_allow_html=True)
@@ -651,11 +641,10 @@ with left:
 
 with right:
     st.subheader("Activity & Logs")
-    # logs area refresh - show logger contents
-    log_text = logger.get()
-    st.text_area("Logs", value=log_text, height=400)
+    st.text_area("Logs", value=logger.get(), height=400)
 
 st.markdown("---")
-st.caption("Run in Paper mode first. For Live mode ensure access_token.json exists and is valid (generated from Kite login).")
+st.caption("Start in Paper mode first. For Live mode ensure access_token.json exists (generate using the Kite login flow in the sidebar).")
 
-# end of file
+# EOF
+
