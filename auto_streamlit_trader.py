@@ -660,8 +660,7 @@ with st.sidebar:
                 safe_save_json(ACCESS_TOKEN_FILE, data)
                 st.success("Access token saved")
                 log("Access token saved")
-                send_sms("
-Access token generated & saved.")
+                send_sms("Access token generated & saved.")
             except Exception as e:
                 st.error(f"Token gen failed: {e}")
                 log(f"Token gen failed: {e}")
