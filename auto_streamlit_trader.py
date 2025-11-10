@@ -249,6 +249,37 @@ class TradingEngine(threading.Thread):
                 log(f"[Live] BUY failed: {e}")
                 send_sms(f"BUY failed: {e}")
                 return None
+                
+# --------------------------------------------
+# Rejection Handling for Buy Orders
+# --------------------------------------------
+
+
+def handle_order_rejection(kite, order_id, trading_symbol):
+    """Cancel all pending orders and notify via SMS if any order is rejected."""
+    try:
+        orders = kite.orders()
+        for o in orders:
+            if o["order_id"] == order_id and o["status"].lower() == "rejected":
+                # Get rejection reason if available
+                reason = o.get("status_message", "Order rejected by exchange")
+                
+                # Cancel all pending/untriggered orders
+                for pending in orders:
+                    if pending["status"].lower() in ["trigger pending", "open", "validation pending"]:
+                        kite.cancel_order(variety=pending["variety"], order_id=pending["order_id"])
+                
+                # Send SMS alert
+                send_sms(f"⚠️ BUY ORDER REJECTED for {trading_symbol}. Reason: {reason}. "
+                         f"All pending orders cancelled.")
+
+                st.error(f"🚫 Order Rejected: {reason}")
+                return True  # indicates rejection handled
+        return False  # no rejection found
+    except Exception as e:
+        st.warning(f"Error checking rejection: {e}")
+        return False
+            
 
     def place_sell(self, exchange, tradingsymbol, qty, ltp):
         if st.session_state.get("mode","Paper") == "Paper":
