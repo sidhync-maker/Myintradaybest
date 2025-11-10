@@ -530,18 +530,70 @@ class TradingEngine(threading.Thread):
         log("Engine ended")
 
 # ------------------------- STREAMLIT UI -------------------------
-st.set_page_config(page_title="Auto Intraday Trader — Live Chart", layout="wide")
+st.set_page_config(page_title="Auto Intraday Trader", layout="wide")
 # Minimal dark CSS
-st.markdown("""
-<style>
-.stApp { background: #071221; color: #e6eef6; }
-h1, h2, h3 { color: #ffffff; font-weight:700; }
-.label-dark { color:#ffffff; font-weight:700; }
-.stButton>button { font-weight:700; }
-</style>
-""", unsafe_allow_html=True)
+# ======= Contrast / Readability CSS (paste after st.set_page_config(...)) =======
+st.markdown(
+    """
+    <style>
+    /* app dark background */
+    .stApp { background: #071221; color: #e6eef6; }
 
-st.title("🔁 Auto Intraday MIS Trader — Live Chart (5s)")
+    /* Headings / labels: always white & bold on dark backgrounds */
+    h1, h2, h3, h4, h5, h6, label, .css-1r6slb0, .stMarkdown, .stText { color: #ffffff !important; font-weight:700 !important; }
+
+    /* Input fields, selects, numbers, password, textarea: make background WHITE and text BLACK & bold for readability */
+    input[type="text"], input[type="password"], input[type="number"], textarea,
+    .stTextInput > div > input, .stTextInput > div > textarea,
+    .stNumberInput input, .stNumberInput, .stSelectbox, .stSelectbox > div > div,
+    .stMultiSelect, .stDateInput input, .stTimeInput input {
+        background: #ffffff !important;
+        color: #000000 !important;
+        font-weight:700 !important;
+        border-radius: 6px !important;
+    }
+
+    /* Placeholder text darker grey so it's readable */
+    ::-webkit-input-placeholder { color: #6b6b6b !important; opacity: 1 !important; }
+    :-ms-input-placeholder { color: #6b6b6b !important; }
+    ::placeholder { color: #6b6b6b !important; }
+
+    /* Buttons: white background + black bold text for high contrast.
+       If you prefer dark buttons with white text, change background to #0b3a5b and color to #fff. */
+    .stButton>button {
+        background: #ffffff !important;
+        color: #000000 !important;
+        font-weight:700 !important;
+        border-radius: 6px !important;
+    }
+
+    /* Make select/combobox popups legible */
+    .stSelectbox > div[role="combobox"] > div { background: #ffffff !important; color: #000 !important; }
+
+    /* Make sidebar inputs readable too */
+    .sidebar .stTextInput input, .sidebar .stNumberInput input, .sidebar .stSelectbox > div > div {
+        background: #ffffff !important;
+        color: #000 !important;
+        font-weight:700 !important;
+    }
+
+    /* Logger / text areas: keep dark but use light text */
+    textarea, .stTextArea>div>textarea { background: #0b1620 !important; color: #e6eef6 !important; font-weight:600 !important; }
+
+    /* Ensure small labels near widgets are readable */
+    .css-1v3fvcr { color: #ffffff !important; font-weight:700 !important; }
+
+    /* Plotly charts keep dark theme, no change */
+    .plotly-graph-div { background: transparent !important; }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+# ======================================================================
+
+
+st.title("🔁 Auto Intraday Trader")
 
 # Sidebar for KITE & SMS
 with st.sidebar:
