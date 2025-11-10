@@ -1,28 +1,33 @@
-# auto_intraday_streamlit_full_option1.py
+# auto_intraday_streamlit_full_updated.py
 """
-Full Streamlit Zerodha Intraday MIS trader
-- Option 1 chart: last 30 candles (fast)
-- Strategy: first-candle bullish immediate buy (9:15-9:30) + after-9:30 VWAP+uptrend buy
+Full Streamlit Zerodha Intraday MIS trader - UPDATED
+- Fast2SMS alerts
+- Manual symbol input
+- Paper/Live selectable manually
+- Strategy:
+   * 9:15-9:30: if first 5-min candle bullish and price rising -> immediate BUY
+   * After 9:30: if latest close > prev close and latest close > VWAP -> BUY
 - Instant SL, initial SL, breakeven -> trailing SL
-- Paper / Live mode
 - MIS leverage qty calc: floor(exposure * leverage / ltp)
-- SMS alerts (optional Fast2SMS / Twilio)
-- Safe token handling: paste request_token once/day to generate access_token
+- Live P&L (green/red/blue)
+- Live last 30 5-min candles (fast)
+- IST timezone applied everywhere (Asia/Kolkata)
+- Safe access token handling (paste request_token once/day)
+- Paper broker simulation included
 """
-
 import os
 import time
 import json
 import threading
 import traceback
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta, time as dtime
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# optional imports
+# Kite optional
 try:
     from kiteconnect import KiteConnect
     KITE_AVAILABLE = True
@@ -30,50 +35,44 @@ except Exception:
     KiteConnect = None
     KITE_AVAILABLE = False
 
-# optional Twilio
+# ---------------- TIMEZONE (IST) ----------------
 try:
-    from twilio.rest import Client as TwilioClient
-    TWILIO_AVAILABLE = True
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
 except Exception:
-    TwilioClient = None
-    TWILIO_AVAILABLE = False
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
 
-# ---------------------------
-# CONFIG - Edit these before running (or set env vars)
-# ---------------------------
-# Kite (Zerodha) app credentials
-API_KEY = os.getenv("ZK_API_KEY", "t32mq5t5xgnjdtni")         # or paste in sidebar
-API_SECRET = os.getenv("ZK_API_SECRET", "xf9jfyfvmqo408m52l4u2gpyo34fcsfe")
+def local_now():
+    return datetime.now(IST)
 
-# Access token storage (kite.generate_session() output)
+def local_time():
+    return local_now().time()
+
+# ---------------- CONFIG (edit / env) ----------------
 ACCESS_TOKEN_FILE = os.getenv("ACCESS_TOKEN_FILE", "access_token.json")
+API_KEY_ENV = os.getenv("ZK_API_KEY", "")
+API_SECRET_ENV = os.getenv("ZK_API_SECRET", "")
 
-# SMS provider - choose "fast2sms", "twilio", or "" to disable
-SMS_PROVIDER = os.getenv("SMS_PROVIDER", "fast2sms").lower()
-FAST2SMS_KEY = os.getenv("FAST2SMS_KEY", "o0EQRX69hWSDnCP2awiTtxvdFMeAZLOgUj1slcNbBrqf3z4GIJBVfSov8laJ7eET160iZCOrHbchKI4G")
-TWILIO_SID = os.getenv("TWILIO_SID", "")
-TWILIO_AUTH = os.getenv("TWILIO_AUTH", "")
-TWILIO_FROM = os.getenv("TWILIO_FROM", "")
-ALERT_MOBILE = os.getenv("ALERT_MOBILE", "918301844858")  # with country code e.g. 9198...
+# Fast2SMS defaults (set via sidebar or env)
+FAST2SMS_DEFAULT_KEY = os.getenv("FAST2SMS_KEY", "")
+FAST2SMS_DEFAULT_NUMBER = os.getenv("ALERT_MOBILE", "")  # e.g. 9198...
 
 # Strategy defaults
 DEFAULT_EXPOSURE = 50000.0
-DEFAULT_LEVERAGE = 5.0
-DEFAULT_SL_PCT = 2.0
+DEFAULT_LEVERAGE = 2.0
+DEFAULT_SL_PCT = 3.0
 DEFAULT_INSTANT_SL_PCT = 1.5
 DEFAULT_TRAIL_PCT = 3.0
 DEFAULT_START_TIME = dtime(9, 15)
 DEFAULT_SQUAREOFF = dtime(15, 15)
-VWAP_CANDLES = 30   # last 30 candles for chart + VWAP calc
+VWAP_CANDLES = 30
 
-# Poll intervals
 PRICE_POLL_SEC = 5
 CHART_REFRESH_SEC = 6
 PNL_POLL_SEC = 5
 
-# ---------------------------
-# UTILITIES
-# ---------------------------
+# ---------------- UTILITIES ----------------
 def safe_load_json(path):
     try:
         if os.path.exists(path) and os.path.getsize(path) > 0:
@@ -88,9 +87,9 @@ def safe_save_json(path, data):
         json.dump(data, f, default=str, indent=2)
 
 def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return local_now().strftime("%Y-%m-%d %H:%M:%S")
 
-# Simple logger
+# ---------------- LOGGER ----------------
 class SimpleLogger:
     def __init__(self, maxlen=2000):
         self.maxlen = maxlen
@@ -98,8 +97,7 @@ class SimpleLogger:
         self.lock = threading.Lock()
     def add(self, msg):
         with self.lock:
-            ts = now_str()
-            self.lines.append(f"[{ts}] {msg}")
+            self.lines.append(f"[{now_str()}] {msg}")
             if len(self.lines) > self.maxlen:
                 self.lines = self.lines[-self.maxlen:]
     def get(self):
@@ -108,9 +106,7 @@ class SimpleLogger:
 
 logger = SimpleLogger()
 
-# ---------------------------
-# SMS helpers
-# ---------------------------
+# ---------------- SMS (Fast2SMS) ----------------
 def send_sms_fast2sms(message, api_key, number):
     try:
         import requests
@@ -131,39 +127,20 @@ def send_sms_fast2sms(message, api_key, number):
         logger.add(f"fast2sms error: {e}")
         return False
 
-def send_sms_twilio(message, sid, auth, from_no, to_no):
-    try:
-        client = TwilioClient(sid, auth)
-        client.messages.create(body=message, from_=from_no, to=to_no)
-        logger.add("SMS twilio sent")
-        return True
-    except Exception as e:
-        logger.add(f"twilio error: {e}")
-        return False
-
 def send_alert(message):
-    logger.add("Alert: " + message)
+    logger.add("ALERT: " + message)
     if st.session_state.get("sms_enabled"):
         provider = st.session_state.get("sms_provider", "")
         if provider == "fast2sms":
-            key = st.session_state.get("fast2sms_key", FAST2SMS_KEY)
-            num = st.session_state.get("sms_number", ALERT_MOBILE)
+            key = st.session_state.get("fast2sms_key", FAST2SMS_DEFAULT_KEY)
+            num = st.session_state.get("sms_number", FAST2SMS_DEFAULT_NUMBER)
             if key and num:
                 send_sms_fast2sms(message, key, num)
-        elif provider == "twilio":
-            sid = st.session_state.get("twilio_sid", TWILIO_SID)
-            auth = st.session_state.get("twilio_auth", TWILIO_AUTH)
-            frm = st.session_state.get("twilio_from", TWILIO_FROM)
-            to = st.session_state.get("sms_number", ALERT_MOBILE)
-            if sid and auth and frm and to:
-                send_sms_twilio(message, sid, auth, frm, to)
 
-# ---------------------------
-# Paper broker (simulation)
-# ---------------------------
+# ---------------- PAPER BROKER ----------------
 class PaperBroker:
     def __init__(self):
-        self.positions = {}   # symbol -> {'qty','avg'}
+        self.positions = {}
         self.orders = {}
         self._next = 1
     def _oid(self):
@@ -208,9 +185,7 @@ class PaperBroker:
                 self.positions[sym] = {'qty':0,'avg':0.0}
         return closed
 
-# ---------------------------
-# Engine (implements strategy)
-# ---------------------------
+# ---------------- TRADING ENGINE ----------------
 class TradingEngine:
     def __init__(self, kite=None, broker=None, live=False, cfg=None):
         self.kite = kite
@@ -240,7 +215,7 @@ class TradingEngine:
         if not self.live or not self.kite:
             return pd.DataFrame()
         try:
-            end = datetime.now()
+            end = local_now()
             start = end - timedelta(days=days)
             data = self.kite.historical_data(int(instrument_token), start, end, interval)
             return pd.DataFrame(data)
@@ -256,7 +231,7 @@ class TradingEngine:
             except Exception as e:
                 logger.add(f"LTP fetch error: {e}")
                 return None
-        # paper simulation fallback - use sim_ltp if provided
+        # paper fallback
         return float(self.cfg.get('sim_ltp', 100.0)) * (1 + np.random.normal(0, 0.001))
 
     def place_market_buy(self, exchange, tradingsymbol, qty, ltp):
@@ -299,6 +274,31 @@ class TradingEngine:
         else:
             return self.broker.place_market_sell(tradingsymbol, qty, ltp)
 
+    def place_slm_try(self, exchange, tradingsymbol, qty, trigger):
+        try:
+            oid = self.kite.place_order(
+                tradingsymbol=tradingsymbol,
+                exchange=exchange,
+                transaction_type=self.kite.TRANSACTION_TYPE_SELL,
+                quantity=qty,
+                order_type=self.kite.ORDER_TYPE_SLM,
+                trigger_price=trigger,
+                product=self.kite.PRODUCT_MIS,
+                variety=self.kite.VARIETY_REGULAR
+            )
+            return oid
+        except Exception as e:
+            logger.add(f"place_slm_try error: {e}")
+            return None
+
+    def modify_slm_try(self, order_id, trigger):
+        try:
+            self.kite.modify_order(order_id=order_id, trigger_price=trigger)
+            return True
+        except Exception as e:
+            logger.add(f"modify_slm_try error: {e}")
+            return False
+
     def run(self):
         logger.add("Engine started")
         self.active = True
@@ -308,7 +308,7 @@ class TradingEngine:
         exchange = cfg['exchange']
         tradingsymbol = cfg['tradingsymbol']
         symbol_ref = f"{exchange}:{tradingsymbol}"
-        instrument_token = cfg.get('instrument_token')  # optional numeric token for historical
+        instrument_token = cfg.get('instrument_token')
         sim_ltp = cfg.get('sim_ltp', 100.0)
         start_time = cfg.get('start_time', DEFAULT_START_TIME)
         squareoff_time = cfg.get('squareoff_time', DEFAULT_SQUAREOFF)
@@ -320,17 +320,16 @@ class TradingEngine:
 
         while not self._stop.is_set():
             try:
-                now = datetime.now()
+                now = local_now()
                 if now.weekday() >= 5:
                     time.sleep(10)
                     continue
 
-                # Fetch last 30 5-min candles fast via historical_data using instrument_token if provided
+                # get candles
                 df = pd.DataFrame()
                 if self.live and self.kite and instrument_token:
                     df = self.get_5min_ohlc(instrument_token, '5minute', days=1)
                 else:
-                    # can't fetch live OHLC for paper or missing token; simulate simple candles around sim_ltp
                     base = float(sim_ltp)
                     prices = base * (1 + np.random.normal(0, 0.002, VWAP_CANDLES))
                     times = [now - timedelta(minutes=5*i) for i in range(VWAP_CANDLES)][::-1]
@@ -343,29 +342,22 @@ class TradingEngine:
                         'volume': np.random.randint(100,1000,size=VWAP_CANDLES)
                     })
 
-                # compute VWAP on df
                 if not df.empty and 'volume' in df.columns:
                     typical = (df['high'] + df['low'] + df['close']) / 3.0
                     cum_vol = df['volume'].cumsum()
                     cum_vp = (typical * df['volume']).cumsum()
                     df['vwap'] = cum_vp / cum_vol
 
-                # strategy entry checks
-                # 1) 9:15-9:30 first candle bullish and rising -> immediate buy
-                # identify first 5-min candle of day: assume df sorted ascending by time
                 if len(df) >= 3:
                     first_candle = df.iloc[0]
                     latest = df.iloc[-1]
                     prev = df.iloc[-2]
 
-                    # 9:15 window condition
-                    if not first_candle_used and start_time <= now.time() <= (datetime.combine(now.date(), start_time) + timedelta(minutes=15)).time():
-                        # first candle bullish?
+                    # 9:15-9:30 first candle bullish & rising -> buy
+                    if (not first_candle_used) and (start_time <= now.time() <= (datetime.combine(now.date(), start_time) + timedelta(minutes=15)).time()):
                         if float(first_candle['close']) > float(first_candle['open']):
-                            # and current/latest price > first candle close -> rising
                             ltp = self.get_ltp(symbol_ref) or sim_ltp
                             if ltp > float(first_candle['close']):
-                                # execute immediate buy if not already in position
                                 if self.entry_price is None:
                                     qty = self.compute_qty(ltp)
                                     if qty > 0:
@@ -377,7 +369,6 @@ class TradingEngine:
                                             self.peak_price = ltp
                                             self.instant_sl_price = round(self.entry_price * (1 - instant_sl_pct/100), 2)
                                             self.sl_trigger = round(self.entry_price * (1 - sl_pct/100), 2)
-                                            # attempt SLM initial SL (live) - best effort
                                             try:
                                                 if self.live:
                                                     self.sl_order_id = self.place_slm_try(exchange, tradingsymbol, qty, self.sl_trigger)
@@ -388,13 +379,12 @@ class TradingEngine:
                                             send_alert(msg)
                                             first_candle_used = True
 
-                    # 2) after 9:30 uptrend: latest close > prev close & latest close > vwap
+                    # after 9:30 uptrend & vwap -> buy
                     if self.entry_price is None:
                         entry_window_after = (datetime.combine(now.date(), dtime(9,30))).time()
                         if now.time() > entry_window_after:
                             try:
                                 if float(latest['close']) > float(prev['close']) and float(latest['close']) > float(latest.get('vwap', -1)):
-                                    # buy
                                     ltp = self.get_ltp(symbol_ref) or float(latest['close'])
                                     qty = self.compute_qty(ltp)
                                     if qty > 0:
@@ -417,21 +407,19 @@ class TradingEngine:
                             except Exception as e:
                                 logger.add(f"After-9:30 logic error: {e}")
 
-                # Post-entry management
+                # post-entry management
                 if self.entry_price is not None:
-                    # get live LTP
                     ltp = self.get_ltp(symbol_ref) or self.entry_price
-                    # update peak
                     if ltp > self.peak_price:
                         self.peak_price = ltp
-                    # instant SL check (immediate protection)
+                    # instant SL
                     if ltp <= self.instant_sl_price:
                         logger.add(f"Instant SL hit @{ltp}")
                         send_alert(f"Instant SL hit for {tradingsymbol} @{ltp}")
                         self.place_market_sell(exchange, tradingsymbol, self.qty, ltp)
                         self.stop()
                         break
-                    # initial SL check
+                    # initial SL
                     if ltp <= self.sl_trigger:
                         logger.add(f"Initial SL hit @{ltp}")
                         send_alert(f"Initial SL hit for {tradingsymbol} @{ltp}")
@@ -441,18 +429,15 @@ class TradingEngine:
                     # breakeven and trailing
                     profit_pct = (ltp - self.entry_price)/self.entry_price*100
                     if profit_pct >= (sl_pct * 3.0):
-                        # move SL to breakeven
                         try:
                             if self.sl_order_id and self.live:
                                 self.modify_slm_try(self.sl_order_id, round(self.entry_price,2))
                                 logger.add("Moved SL to breakeven")
                                 send_alert(f"Moved SL to breakeven for {tradingsymbol}")
                             else:
-                                # update local sl_trigger
                                 self.sl_trigger = round(self.entry_price,2)
                         except Exception as e:
                             logger.add(f"Breakeven move error: {e}")
-                    # trailing
                     trailing_trigger = round(self.peak_price * (1 - trail_pct/100), 2)
                     if trailing_trigger > self.sl_trigger:
                         try:
@@ -462,7 +447,7 @@ class TradingEngine:
                             logger.add(f"Trailing SL updated -> {trailing_trigger} (peak {self.peak_price})")
                         except Exception as e:
                             logger.add(f"Trailing modify error: {e}")
-                    # auto square-off
+                    # square-off
                     if now.time() >= squareoff_time:
                         logger.add("Square-off time reached -> exiting")
                         send_alert(f"Auto square-off for {tradingsymbol}")
@@ -484,49 +469,20 @@ class TradingEngine:
     def stop(self):
         self._stop.set()
 
-    # Helper wrappers for live sl modification attempt - best effort
-    def place_slm_try(self, exchange, tradingsymbol, qty, trigger):
-        try:
-            oid = self.kite.place_order(
-                tradingsymbol=tradingsymbol,
-                exchange=exchange,
-                transaction_type=self.kite.TRANSACTION_TYPE_SELL,
-                quantity=qty,
-                order_type=self.kite.ORDER_TYPE_SLM,
-                trigger_price=trigger,
-                product=self.kite.PRODUCT_MIS,
-                variety=self.kite.VARIETY_REGULAR
-            )
-            return oid
-        except Exception as e:
-            logger.add(f"place_slm_try error: {e}")
-            return None
-    def modify_slm_try(self, order_id, trigger):
-        try:
-            self.kite.modify_order(order_id=order_id, trigger_price=trigger)
-            return True
-        except Exception as e:
-            logger.add(f"modify_slm_try error: {e}")
-            return False
+# ---------------- STREAMLIT APP ----------------
+st.set_page_config(page_title="Auto Intraday Trader — Updated", layout="wide")
+st.title("🔁 Auto Intraday MIS Trader — IST fixed, Fast2SMS, Paper/Live")
 
-# ---------------------------
-# Streamlit UI & threads
-# ---------------------------
-st.set_page_config(page_title="Auto Intraday Trader — Option1 Chart", layout="wide")
-st.title("Auto Intraday MIS Trader — Last 30 5-min candles (Option 1)")
-
-# Sidebar: connection & mode & SMS
+# Sidebar connection & SMS
 with st.sidebar:
-    st.header("Connection & Mode")
-    api_key_in = st.text_input("Kite API Key (or set env ZK_API_KEY)", value=API_KEY, type="password")
-    api_secret_in = st.text_input("Kite API Secret (or set env ZK_API_SECRET)", value=API_SECRET, type="password")
-    provider = st.selectbox("SMS provider", ["none","fast2sms","twilio"], index=0)
-    sms_number = st.text_input("SMS number (with country code, e.g., 9198...)", value=ALERT_MOBILE)
-    fast2key = st.text_input("Fast2SMS API Key", value=FAST2SMS_KEY, type="password")
-    tw_sid = st.text_input("Twilio SID", value=TWILIO_SID, type="password")
-    tw_auth = st.text_input("Twilio Auth", value=TWILIO_AUTH, type="password")
-    tw_from = st.text_input("Twilio From", value=TWILIO_FROM)
-    # token flow helpers
+    st.header("Connection & Alerts")
+    api_key_in = st.text_input("Kite API Key (or set env ZK_API_KEY)", value=API_KEY_ENV, type="password")
+    api_secret_in = st.text_input("Kite API Secret (or set env ZK_API_SECRET)", value=API_SECRET_ENV, type="password")
+    provider = st.selectbox("SMS provider", ["none","fast2sms"], index=1)
+    sms_number = st.text_input("SMS number (with country code e.g., 9198...)", value=FAST2SMS_DEFAULT_NUMBER)
+    fast2key = st.text_input("Fast2SMS API Key", value=FAST2SMS_DEFAULT_KEY, type="password")
+
+    # Kite login helpers
     if st.button("Show Kite Login URL"):
         if not api_key_in:
             st.error("Provide Kite API Key")
@@ -535,7 +491,7 @@ with st.sidebar:
         else:
             t = KiteConnect(api_key=api_key_in)
             st.code(t.login_url())
-            st.caption("Open the URL, login, copy request_token from redirected URL and paste below.")
+            st.caption("Open URL, login, copy request_token from redirect, paste below.")
     request_token_in = st.text_input("Paste request_token (from Kite redirect)")
 
     if st.button("Generate & Save Access Token"):
@@ -552,63 +508,56 @@ with st.sidebar:
                 st.error(f"Token gen failed: {e}")
                 logger.add(f"Token gen failed: {e}")
 
-# Mode & strategy params
-col_cfg1, col_cfg2 = st.columns([2,2])
-with col_cfg1:
+# Main config (manual symbol)
+col1, col2 = st.columns([2,2])
+with col1:
     mode = st.selectbox("Mode", ["Paper","Live"], index=0)
     exchange = st.selectbox("Exchange", ["NSE","BSE"], index=0)
-    tradingsymbol = st.text_input("Trading symbol (exact, e.g. RELIANCE or NIFTY25NOV...)", value="RELIANCE")
+    tradingsymbol = st.text_input("Trading symbol (exact)", value="RELIANCE").strip().upper()
     instrument_token = st.text_input("Instrument token (numeric) - optional", value="")
-with col_cfg2:
+with col2:
     exposure = st.number_input("Exposure (₹)", value=DEFAULT_EXPOSURE)
     leverage = st.number_input("Leverage", value=DEFAULT_LEVERAGE, step=0.5)
     sl_pct = st.number_input("Initial SL %", value=DEFAULT_SL_PCT, step=0.1)
     instant_sl_pct = st.number_input("Instant SL %", value=DEFAULT_INSTANT_SL_PCT, step=0.1)
     trail_pct = st.number_input("Trailing % after breakeven", value=DEFAULT_TRAIL_PCT, step=0.1)
-    start_time = st.time_input("Auto start time", value=DEFAULT_START_TIME)
-    squareoff_time = st.time_input("Auto square-off time", value=DEFAULT_SQUAREOFF)
-    sim_ltp = st.number_input("Paper sim LTP (used when Paper mode or no LTP)", value=100.0)
+    start_time = st.time_input("Auto start time (IST)", value=DEFAULT_START_TIME)
+    squareoff_time = st.time_input("Auto square-off time (IST)", value=DEFAULT_SQUAREOFF)
+    sim_ltp = st.number_input("Paper sim LTP", value=100.0)
 
-# apply SMS config to session state
+# session sms config
 st.session_state['sms_enabled'] = (provider != "none")
 st.session_state['sms_provider'] = provider
 st.session_state['sms_number'] = sms_number
 st.session_state['fast2sms_key'] = fast2key
-st.session_state['twilio_sid'] = tw_sid
-st.session_state['twilio_auth'] = tw_auth
-st.session_state['twilio_from'] = tw_from
 
-# Build kite instance if possible
+# build kite if possible
 saved = safe_load_json(ACCESS_TOKEN_FILE)
 kite = None
 if saved and api_key_in and KITE_AVAILABLE and mode == "Live":
     try:
         kite = KiteConnect(api_key=api_key_in)
         kite.set_access_token(saved.get('access_token'))
-        # quick verify
         try:
             kite.profile()
             st.sidebar.success("Kite connected (live).")
-        except Exception as e:
+        except Exception:
             st.sidebar.warning("Saved token invalid/expired. Generate a fresh token.")
             kite = None
     except Exception as e:
         st.sidebar.error(f"Kite build failed: {e}")
         kite = None
 
-# paper broker
+# initialize paper broker and engine holder
 if 'paper_broker' not in st.session_state:
     st.session_state['paper_broker'] = PaperBroker()
-
-# engine holder
 if 'engine' not in st.session_state:
     st.session_state['engine'] = None
 
-# create engine config
 engine_cfg = {
-    'tradingsymbol': tradingsymbol.strip().upper(),
+    'tradingsymbol': tradingsymbol,
     'exchange': exchange,
-    'instrument_token': instrument_token.strip(),
+    'instrument_token': instrument_token,
     'exposure': exposure,
     'leverage': leverage,
     'sl_pct': sl_pct,
@@ -620,7 +569,7 @@ engine_cfg = {
     'sms_enabled': st.session_state['sms_enabled']
 }
 
-# start/stop buttons
+# Start/Stop controls
 c1, c2, c3 = st.columns(3)
 with c1:
     if st.button("Start Engine (background)"):
@@ -642,7 +591,7 @@ with c2:
             st.success("Engine stop requested")
             logger.add("Engine stop requested")
 with c3:
-    if st.button("Emergency Exit (cancel & close)"):
+    if st.button("Emergency Exit (stop)"):
         eng = st.session_state.get('engine')
         if eng:
             eng.stop()
@@ -650,11 +599,11 @@ with c3:
             logger.add("Emergency exit requested")
             send_alert("Emergency exit requested by user")
 
-# Chart + P&L area
+# Chart & P&L
 st.markdown("---")
 left, right = st.columns([3,1])
 with left:
-    st.subheader("Live 5-min Candles (last 30) — chart updates fast")
+    st.subheader("Live 5-min Candles (last 30)")
     chart_placeholder = st.empty()
 with right:
     st.subheader("Live P&L & Status")
@@ -662,102 +611,86 @@ with right:
     pnl_box = st.empty()
     logs_box = st.empty()
 
-# Chart updater thread (last 30 candles)
+# Chart updater
 def chart_updater():
     while True:
         try:
             eng = st.session_state.get('engine')
-            # choose source for candles
             df = pd.DataFrame()
             if eng and eng.live and eng.kite and eng.cfg.get('instrument_token'):
                 df = eng.get_5min_ohlc(eng.cfg['instrument_token'], '5minute', days=1)
             else:
-                # try to fetch by using kite.ltp and historical_data if kite available
+                # try kite historical if available
                 if kite and KITE_AVAILABLE and engine_cfg.get('instrument_token'):
-                    df = eng.get_5min_ohlc(engine_cfg['instrument_token'], '5minute', days=1)
-                # fallback to simulated candles using sim_ltp
+                    try:
+                        temp_eng = TradingEngine(kite=kite, cfg=engine_cfg, live=True)
+                        df = temp_eng.get_5min_ohlc(engine_cfg['instrument_token'], '5minute', days=1)
+                    except Exception:
+                        df = pd.DataFrame()
             if df.empty:
-                # simulate last 30 candles
                 base = engine_cfg.get('sim_ltp', 100.0)
                 prices = base * (1 + np.random.normal(0,0.0015, VWAP_CANDLES))
-                times = [datetime.now() - timedelta(minutes=5*(VWAP_CANDLES-i)) for i in range(VWAP_CANDLES)]
+                times = [local_now() - timedelta(minutes=5*(VWAP_CANDLES-i)) for i in range(VWAP_CANDLES)]
                 df = pd.DataFrame({'date':times, 'open':prices, 'high':prices*(1+0.001), 'low':prices*(1-0.001), 'close':prices, 'volume':np.random.randint(100,1000,VWAP_CANDLES)})
-            # ensure sorted ascending
             if 'date' in df.columns:
                 df = df.sort_values('date').tail(VWAP_CANDLES)
             else:
-                # if times are indexed differently, just take tail
                 df = df.tail(VWAP_CANDLES)
-            # VWAP
             typical = (df['high'] + df['low'] + df['close']) / 3.0
             df['cum_vol'] = df['volume'].cumsum()
             df['cum_vp'] = (typical * df['volume']).cumsum()
             df['vwap'] = df['cum_vp'] / df['cum_vol']
-            # build candlestick chart with plotly
-            fig = go.Figure(data=[go.Candlestick(x=df['date'],
-                                                 open=df['open'], high=df['high'], low=df['low'], close=df['close'],
-                                                 name='candles')])
-            # VWAP line
+            fig = go.Figure(data=[go.Candlestick(x=df['date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='candles')])
             fig.add_trace(go.Scatter(x=df['date'], y=df['vwap'], name='VWAP', mode='lines', line=dict(width=1)))
-            # Markers for buy/exit if engine has recorded events
             eng_local = st.session_state.get('engine')
             buys = []
-            exits = []
             sl_lines = []
             if eng_local:
                 if eng_local.entry_price:
                     buys = [{'x': eng_local.entry_time, 'y': eng_local.entry_price}]
                     sl_lines.append(('InstantSL', eng_local.instant_sl_price))
                     sl_lines.append(('CurrentSL', eng_local.sl_trigger))
-                # if engine stopped but had last order, nothing else
-            # Draw buy / exit markers
             for b in buys:
-                fig.add_trace(go.Scatter(x=[b['x']], y=[b['y']], mode='markers', marker_symbol='triangle-up', marker_color='green', marker_size=14, name='BUY'))
+                if b['x'] is not None:
+                    fig.add_trace(go.Scatter(x=[b['x']], y=[b['y']], mode='markers', marker_symbol='triangle-up', marker_color='green', marker_size=12, name='BUY'))
             for label,val in sl_lines:
-                fig.add_hline(y=val, line=dict(color='orange' if 'Instant' in label else 'red', dash='dash'), annotation_text=label, annotation_position='top left')
+                if val is not None:
+                    fig.add_hline(y=val, line=dict(color='orange' if 'Instant' in label else 'red', dash='dash'), annotation_text=label, annotation_position='top left')
             fig.update_layout(xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=30,b=10), height=520)
             chart_placeholder.plotly_chart(fig, use_container_width=True)
-            # status/pnl/logs
             if eng_local and eng_local.entry_price:
                 ltp = eng_local.get_ltp(f"{eng_local.cfg['exchange']}:{eng_local.cfg['tradingsymbol']}") or eng_local.entry_price
                 unreal = (ltp - eng_local.entry_price) * eng_local.qty
                 color = "green" if unreal > 0 else "red" if unreal < 0 else "blue"
-                status_box.markdown(f"**Engine:** {'Live' if eng_local.live else 'Paper'}  \n**Symbol:** {eng_local.cfg['tradingsymbol']}  \n**Entry:** ₹{eng_local.entry_price}  \n**Qty:** {eng_local.qty}")
+                status_box.markdown(f"**Mode:** {'Live' if eng_local.live else 'Paper'}  \n**Symbol:** {eng_local.cfg['tradingsymbol']}  \n**Entry:** ₹{eng_local.entry_price}  \n**Qty:** {eng_local.qty}")
                 pnl_box.markdown(f"<h3 style='color:{color};'>Unreal P&L: ₹{unreal:.2f}</h3>", unsafe_allow_html=True)
             else:
-                # show account positions (if kite)
                 if kite:
                     try:
                         pos = kite.positions()
                         net = pos.get('net', []) if isinstance(pos, dict) else []
-                        total = 0.0
-                        lines = []
+                        total = 0.0; lines = []
                         for p in net:
                             sym = p.get('tradingsymbol'); q = int(p.get('quantity',0) or 0); pnl = float(p.get('pnl',0) or 0)
-                            total += pnl
-                            lines.append(f"{sym}: qty={q} pnl={pnl}")
+                            total += pnl; lines.append(f"{sym}: qty={q} pnl={pnl}")
                         color = "green" if total > 0 else "red" if total < 0 else "blue"
                         pnl_box.markdown(f"<h3 style='color:{color};'>Total P&L: ₹{total:.2f}</h3>", unsafe_allow_html=True)
                         status_box.text("\n".join(lines[:10]) if lines else "No open positions")
-                    except Exception as e:
+                    except Exception:
                         status_box.text("No kite connection / positions")
                 else:
                     status_box.text("No active position")
-                    pnl_box.text("P&L not available (no engine/kite)")
+                    pnl_box.text("P&L not available")
             logs_box.text_area("Logs", value=logger.get(), height=300)
         except Exception as e:
             logger.add(f"chart_updater error: {e}")
         time.sleep(CHART_REFRESH_SEC)
 
-# start chart updater thread once
 if 'chart_thread' not in st.session_state:
     st.session_state['chart_thread'] = threading.Thread(target=chart_updater, daemon=True)
     st.session_state['chart_thread'].start()
 
-st.caption("Chart shows last 30 5-minute candles (Option 1).")
-
-# final note
+st.caption("Chart: last 30 x 5-min candles (IST). Run in Paper mode to test fully.")
 st.markdown("---")
-st.caption("Run in Paper mode to test fully. For Live mode: generate access token via sidebar then Start Engine. Always test carefully with small exposure before using real capital.")
-
+st.caption("Always test in Paper mode with small exposure before live.")
 
