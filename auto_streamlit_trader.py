@@ -572,7 +572,7 @@ st.markdown(
 
     /* Make sidebar inputs readable too */
     .sidebar .stTextInput input, .sidebar .stNumberInput input, .sidebar .stSelectbox > div > div {
-        background: #ffffff !important;
+        background: #1E90FF !important;
         color: #000 !important;
         font-weight:700 !important;
     }
