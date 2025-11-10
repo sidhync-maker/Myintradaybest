@@ -1,20 +1,12 @@
-# auto_streamlit_trader_v4_pro.py
+# auto_streamlit_trader_v5_ui.py
 """
-Auto Intraday Streamlit Trader — v4 PRO
-Full feature set:
-- Manual daily request_token -> generate_session -> save access_token
-- Fast2SMS alerts (placeholder; configure in sidebar)
-- Paper / Live toggle
-- Manual Start / Manual Stop / Emergency Stop
-- Instant SL, Initial SL, Breakeven -> Trailing SL
-- On SL/manual/emergency stop -> cancel pending & exit triggered positions
-- Reject protection (no retry on rejected orders)
-- Live VWAP + 5-min candle chart (last 30 minutes) auto-update every 5s
-- Digital IST clock (top-right)
-- Access & Kite connect status (green/red dots)
-- NIFTY trend (SMA20 vs SMA50)
-- Smart-contrast UI theme
-- 15:15 square-off & 15:20 safety flatten
+Auto Intraday Streamlit Trader — v5 Full UI (final fixes)
+- Digital clock fixed at top-right
+- Chart positioned BELOW the P&L panel
+- Sidebar visible and readable
+- All labels/buttons/inputs high-contrast and readable
+- Core trading logic, safety routines and SMS alerts included
+- Test in PAPER mode first
 """
 
 import os
@@ -30,7 +22,7 @@ import numpy as np
 import plotly.graph_objects as go
 import requests
 
-# Attempt optional kiteconnect
+# Optional KiteConnect import
 try:
     from kiteconnect import KiteConnect
     KITE_AVAILABLE = True
@@ -38,7 +30,7 @@ except Exception:
     KiteConnect = None
     KITE_AVAILABLE = False
 
-# Timezone IST (zoneinfo or pytz fallback)
+# IST timezone
 try:
     from zoneinfo import ZoneInfo
     IST = ZoneInfo("Asia/Kolkata")
@@ -52,10 +44,10 @@ def tz_now():
 def now_str():
     return tz_now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ---------------- CONFIG ----------------
+# ---------- CONFIG ----------
 ACCESS_TOKEN_FILE = "access_token.json"
 FAST2SMS_PLACEHOLDER = "your_fast2sms_key_here"
-FAST2SMS_DEFAULT_NUMBER = ""  # Enter default in sidebar
+FAST2SMS_DEFAULT_NUMBER = ""
 DEFAULT_EXPOSURE = 50000.0
 DEFAULT_LEVERAGE = 5
 DEFAULT_SL_PCT = 3.0
@@ -63,26 +55,26 @@ DEFAULT_INSTANT_SL_PCT = 1.5
 DEFAULT_TRAIL_PCT = 3.0
 DEFAULT_START_TIME = dtime(9,15)
 DEFAULT_SQUAREOFF = dtime(15,15)
-CANDLES_COUNT = 6  # 6 * 5m = 30 minutes
-CHART_INTERVAL = 5  # seconds
-CLOCK_INTERVAL = 1  # seconds
-NIFTY_TOKEN = "256265"  # default token for nifty in many setups
+CANDLES_COUNT = 6           # 6*5min = 30 min
+CHART_REFRESH_SEC = 5
+CLOCK_REFRESH_SEC = 1
+NIFTY_TOKEN = "256265"      # adjust if needed
 
-# ---------------- Utilities ----------------
+# ---------- UTILITIES ----------
 def safe_load_json(path):
     try:
         if os.path.exists(path) and os.path.getsize(path) > 0:
-            with open(path, "r") as f:
+            with open(path,"r") as f:
                 return json.load(f)
     except Exception:
         return None
     return None
 
 def safe_save_json(path, data):
-    with open(path, "w") as f:
+    with open(path,"w") as f:
         json.dump(data, f, default=str, indent=2)
 
-# session logger
+# session log
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
 def log(msg):
@@ -90,7 +82,7 @@ def log(msg):
     if len(st.session_state["logs"]) > 2000:
         st.session_state["logs"] = st.session_state["logs"][-2000:]
 
-# ----------------- SMS (Fast2SMS) -----------------
+# ---------- SMS (Fast2SMS) ----------
 def send_fast2sms(message, api_key, number):
     if not api_key or not number:
         log("Fast2SMS missing key/number; SMS not sent.")
@@ -106,22 +98,21 @@ def send_fast2sms(message, api_key, number):
         }
         headers = {'authorization': api_key}
         r = requests.post(url, data=payload, headers=headers, timeout=10)
-        log(f"Fast2SMS status={r.status_code} message='{message[:80]}'")
+        log(f"Fast2SMS status={r.status_code} msg={message[:60]}")
         return r.status_code == 200
     except Exception as e:
         log(f"Fast2SMS error: {e}")
         return False
 
 def send_sms(message):
-    # wrapper that uses saved sidebar settings
     key = st.session_state.get("fast2sms_key") or FAST2SMS_PLACEHOLDER
     num = st.session_state.get("sms_number") or FAST2SMS_DEFAULT_NUMBER
     ok = send_fast2sms(message, key, num)
     if not ok:
-        log("SMS send failed (check key/number).")
+        log("SMS failed to send (check key/number).")
     return ok
 
-# ---------------- Paper broker ----------------
+# ---------- Paper Broker ----------
 class PaperBroker:
     def __init__(self):
         self.positions = {}
@@ -171,12 +162,8 @@ class PaperBroker:
                 self.positions[s] = {'qty':0,'avg':0.0}
         return closed
 
-# ---------------- Order rejection handler ----------------
+# ---------- Rejection handling ----------
 def handle_rejected_and_cleanup(kite, order_id, symbol):
-    """
-    For live mode: check kite.orders() for the given order_id. If status indicates rejection,
-    cancel all pending orders and send SMS. Returns True if rejection detected and handled.
-    """
     if not kite:
         return False
     try:
@@ -186,7 +173,7 @@ def handle_rejected_and_cleanup(kite, order_id, symbol):
                 status = (o.get("status") or "").upper()
                 if "REJECT" in status or ("CANCEL" in status and o.get("status_message")):
                     reason = o.get("status_message") or status
-                    # cancel pending orders
+                    # cancel pending
                     for p in orders:
                         pstatus = (p.get("status") or "").upper()
                         if pstatus in ("OPEN","TRIGGER PENDING","PENDING","VALIDATION PENDING"):
@@ -194,15 +181,15 @@ def handle_rejected_and_cleanup(kite, order_id, symbol):
                                 kite.cancel_order(order_id=p['order_id'], variety=p.get('variety', kite.VARIETY_REGULAR))
                             except Exception as e:
                                 log(f"Failed cancel {p.get('order_id')}: {e}")
-                    send_sms(f"⚠️ ORDER REJECTED for {symbol}. Reason: {reason}. Pending orders cancelled.")
-                    log(f"Order {order_id} rejected: {reason}. Pending cancelled.")
+                    send_sms(f"⚠️ ORDER REJECTED for {symbol}. Reason: {reason}. Pending cancelled.")
+                    log(f"Order {order_id} rejected: {reason}.")
                     return True
         return False
     except Exception as e:
-        log(f"Error in handle_rejected_and_cleanup: {e}")
+        log(f"handle_rejected error: {e}")
         return False
 
-# ---------------- Trading Engine ----------------
+# ---------- Trading Engine ----------
 class TradingEngine(threading.Thread):
     def __init__(self, kite=None, broker=None, cfg=None):
         super().__init__(daemon=True)
@@ -210,7 +197,6 @@ class TradingEngine(threading.Thread):
         self.broker = broker or PaperBroker()
         self.cfg = cfg or {}
         self._stop = threading.Event()
-        # runtime values
         self.entry_price = None
         self.qty = 0
         self.entry_time = None
@@ -269,7 +255,6 @@ class TradingEngine(threading.Thread):
             except Exception as e:
                 log(f"[Live] BUY failed: {e}")
                 send_sms(f"BUY failed for {tradingsymbol}: {e}")
-                # cancel pending and don't retry
                 try:
                     self.cancel_all_pending()
                 except Exception:
@@ -327,7 +312,7 @@ class TradingEngine(threading.Thread):
                 net = pos.get('net', []) if isinstance(pos, dict) else []
                 closed=[]
                 for p in net:
-                    qty = int(p.get('quantity', 0) or 0)
+                    qty = int(p.get('quantity',0) or 0)
                     if qty == 0:
                         continue
                     tx = self.kite.TRANSACTION_TYPE_SELL if qty>0 else self.kite.TRANSACTION_TYPE_BUY
@@ -372,7 +357,6 @@ class TradingEngine(threading.Thread):
                     time.sleep(5)
                     continue
 
-                # get chart df (chart thread owns it)
                 df = st.session_state.get("chart_df", pd.DataFrame())
                 if df.empty:
                     base = sim_ltp
@@ -384,13 +368,13 @@ class TradingEngine(threading.Thread):
                 ltp = self.get_ltp(symbol_ref) or df['close'].iloc[-1]
                 qty = self.compute_qty(ltp)
 
-                # ENTRY logic: first candle 9:15 bullish rising OR after 9:30 trend+vwap
+                # ENTRY logic
                 if len(df) >= 2:
                     first_candle = df.iloc[0]
                     latest = df.iloc[-1]
                     prev = df.iloc[-2]
 
-                    # 9:15 immediate buy
+                    # 9:15 window immediate buy
                     if (not first_candle_used) and (start_time <= now.time() <= (datetime.combine(now.date(), start_time) + timedelta(minutes=15)).time()):
                         if float(first_candle['close']) > float(first_candle['open']) and ltp > float(first_candle['close']) and self.entry_price is None:
                             order_id = self.place_buy(exchange, tradingsymbol, qty, ltp)
@@ -412,7 +396,7 @@ class TradingEngine(threading.Thread):
                                     send_sms(f"[Paper] BUY executed {tradingsymbol} @{self.entry_price} qty={self.qty} SL={self.sl_trigger} InstantSL={self.instant_sl}")
                                 first_candle_used = True
 
-                    # after 9:30 uptrend logic
+                    # after 9:30 uptrend + vwap buy
                     if self.entry_price is None and now.time() > dtime(9,30):
                         try:
                             if float(latest['close']) > float(prev['close']) and float(latest['close']) > float(latest.get('vwap', -1)):
@@ -436,7 +420,7 @@ class TradingEngine(threading.Thread):
                         except Exception as e:
                             log(f"after-9:30 error: {e}")
 
-                # Post-entry management
+                # POST ENTRY - SL checks, trailing, breakeven
                 if self.entry_price is not None:
                     if ltp > self.peak:
                         self.peak = ltp
@@ -474,7 +458,7 @@ class TradingEngine(threading.Thread):
                         send_sms(f"Trailing SL updated -> {trailing_trigger} (peak {self.peak})")
 
                 # auto square-off at 15:15
-                if now.time() >= dtime(15,15):
+                if tz_now().time() >= dtime(15,15):
                     log("Square-off - flattening")
                     send_sms("Square-off reached - flattening positions")
                     self.cancel_all_pending()
@@ -482,7 +466,7 @@ class TradingEngine(threading.Thread):
                     st.session_state["trading_active"] = False
                     break
 
-                # short sleep
+                # small sleeps
                 for _ in range(3):
                     if self.stopped():
                         break
@@ -502,47 +486,61 @@ class TradingEngine(threading.Thread):
 
         log("Engine ended")
 
-# ---------------- Streamlit UI ----------------
-st.set_page_config(page_title="Auto Intraday Trader v4 Pro", layout="wide")
+# ---------- STREAMLIT UI ----------
+st.set_page_config(page_title="Auto Intraday Trader v5", layout="wide")
 
-# CSS theme & smart-contrast rules (main dark blue; sidebar black)
+# CSS theme ensuring high contrast everywhere (fix visibility issues)
 st.markdown("""
 <style>
-/* MAIN */
-.stApp { background-color: #001F3F !important; color: #ffffff !important; }
+/* App background & text */
+body, .stApp { background-color: #001F3F !important; color: #ffffff !important; }
 h1,h2,h3,h4,h5,h6 { color: #FFD700 !important; font-weight:800 !important; }
-label, p, span, div, .stMarkdown { color: #ffffff !important; font-weight:700 !important; }
+label, p, span, .stMarkdown, .css-1v3fvcr { color: #ffffff !important; font-weight:700 !important; }
 
-/* Inputs & buttons: sky blue with bold black text for main area */
+/* Main inputs/buttons */
 input[type="text"], input[type="password"], input[type="number"], textarea,
-.stTextInput > div > input, .stTextInput > div > textarea, .stNumberInput input,
-.stSelectbox > div, .stMultiSelect > div {
-    background-color: #87CEEB !important; color:#000000 !important; font-weight:700 !important;
-    border:2px solid #004080 !important; border-radius:6px !important;
+.stTextInput > div > input, .stNumberInput input, .stSelectbox > div {
+    background-color: #87CEEB !important; color:#000000 !important; font-weight:700 !important; border-radius:6px !important;
 }
 .stButton>button { background-color:#87CEEB !important; color:#000000 !important; font-weight:800 !important; border-radius:8px !important; }
-.stButton>button:hover { background-color:#5dbcd2 !important; }
 
-/* SIDEBAR (black background with white labels; inputs white with black text) */
+/* Sidebar */
 [data-testid="stSidebar"] { background-color: #000000 !important; color: #ffffff !important; }
-[data-testid="stSidebar"] input, [data-testid="stSidebar"] select, [data-testid="stSidebar"] textarea { background-color:#ffffff !important; color:#000000 !important; font-weight:700 !important; border-radius:6px !important; }
-[data-testid="stSidebar"] button { background:#ffffff !important; color:#000000 !important; font-weight:800 !important; border-radius:6px !important; }
+[data-testid="stSidebar"] input, [data-testid="stSidebar"] select, [data-testid="stSidebar"] textarea { background-color:#ffffff !important; color:#000000 !important; font-weight:700 !important; }
 
-/* placeholders */
-::placeholder { color:#333333 !important; }
+/* Clock big yellow */
+.clock-style { color:#FFD700; font-weight:900; font-size:20px; text-align:right; }
 
-/* P&L classes */
-.profit { color:#00FF00 !important; font-weight:700 !important; }
-.loss { color:#FF0000 !important; font-weight:700 !important; }
-.neutral { color:#1E90FF !important; font-weight:700 !important; }
-
+/* Chart container adjustments */
 .plotly-graph-div { background: transparent !important; }
+
+/* Links and placeholders contrast */
+::placeholder { color:#333333 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🔁 Auto Intraday Trader — v4 Pro (Smart Contrast)")
+# HEADER: connection dots + digital clock (top-right) + token status
+left_header, middle_header, right_header = st.columns([2,6,2])
+with left_header:
+    st.markdown("**🔁 Auto Intraday Trader v5**", unsafe_allow_html=True)
+with middle_header:
+    # show small instructions
+    st.markdown("**Test in Paper mode first.** Sidebar → add Kite API & Fast2SMS key.", unsafe_allow_html=True)
+with right_header:
+    clock_place = st.empty()
+    # clock updater thread
+    def clock_loop():
+        while True:
+            try:
+                clock_place.markdown(f"<div class='clock-style'>{tz_now().strftime('%Y-%m-%d %H:%M:%S IST')}</div>", unsafe_allow_html=True)
+            except Exception:
+                pass
+            time.sleep(CLOCK_REFRESH_SEC)
+    if 'clock_thread' not in st.session_state:
+        st.session_state['clock_thread'] = threading.Thread(target=clock_loop, daemon=True)
+        st.session_state['clock_thread'].start()
 
-# Sidebar: connection, token, Fast2SMS
+# Sidebar (always visible)
 with st.sidebar:
     st.header("Connection & Alerts")
     api_key = st.text_input("Kite API Key", value=os.getenv("ZK_API_KEY",""), type="password")
@@ -583,7 +581,7 @@ with st.sidebar:
         st.success("SMS settings saved")
         log("SMS settings saved")
 
-# Build kite client if token present
+# Build kite client (if possible)
 saved_access = safe_load_json(ACCESS_TOKEN_FILE)
 access_available = bool(saved_access and saved_access.get("access_token"))
 kite = None
@@ -605,81 +603,45 @@ if KITE_AVAILABLE and api_key:
     except Exception as e:
         log(f"Kite init error: {e}")
 
-# Header top row: connection dots + clock + P&L summary placeholder
-col1, col2, col3 = st.columns([1,1,4])
-with col1:
+# show connection/status dots under header
+c1,c2,c3 = st.columns([1,1,6])
+with c1:
     st.markdown("**Kite**")
     if kite_connected:
         st.markdown("<span style='color:#00ff00; font-weight:700'>● Connected</span>", unsafe_allow_html=True)
     else:
         st.markdown("<span style='color:#ff3333; font-weight:700'>● Not connected</span>", unsafe_allow_html=True)
-with col2:
-    st.markdown("**Access token**")
+with c2:
+    st.markdown("**Access**")
     if access_available:
         st.markdown("<span style='color:#00ff00; font-weight:700'>● Saved</span>", unsafe_allow_html=True)
     else:
         st.markdown("<span style='color:#ff3333; font-weight:700'>● Not saved</span>", unsafe_allow_html=True)
-with col3:
-    clock_holder = st.empty()
-    # clock thread updates every CLOCK_INTERVAL seconds
-    def clock_job():
-        while True:
-            try:
-                clock_holder.markdown(f"<h3 style='text-align:right; color:#00FFFF; font-weight:700'>{tz_now().strftime('%Y-%m-%d %H:%M:%S IST')}</h3>", unsafe_allow_html=True)
-            except Exception:
-                pass
-            time.sleep(CLOCK_INTERVAL)
-    if 'clock_thread' not in st.session_state:
-        st.session_state['clock_thread'] = threading.Thread(target=clock_job, daemon=True)
-        st.session_state['clock_thread'].start()
-
-# NIFTY trend
-def get_nifty_trend(kite):
-    try:
-        if not kite:
-            return "Unknown"
-        end = tz_now()
-        start = end - timedelta(days=2)
-        data = kite.historical_data(int(NIFTY_TOKEN), start, end, '5minute')
-        df = pd.DataFrame(data)
-        if df.empty:
-            return "Unknown"
-        df['sma20'] = df['close'].rolling(20).mean()
-        df['sma50'] = df['close'].rolling(50).mean()
-        if df['sma20'].iloc[-1] > df['sma50'].iloc[-1]:
-            return "Uptrend"
-        else:
-            return "Downtrend"
-    except Exception as e:
-        log(f"nifty trend error: {e}")
-        return "Unknown"
-
-nifty_trend = get_nifty_trend(kite) if KITE_AVAILABLE else "Unknown"
-st.markdown(f"**NIFTY Trend:** **{nifty_trend}**")
 
 st.markdown("---")
 
-# Main UI config
-left, right = st.columns([3,1])
-with left:
-    st.subheader("Strategy & Symbol")
+# Main configuration & controls
+left_col, right_col = st.columns([2,1])
+with left_col:
+    st.subheader("Strategy & Symbol (visible labels)")
     mode = st.selectbox("Mode", ["Paper","Live"], index=0)
     st.session_state["mode"] = mode
     exchange = st.selectbox("Exchange", ["NSE","BSE"], index=0)
-    tradingsymbol = st.text_input("Trading symbol (exact)", value="RELIANCE").strip().upper()
+    tradingsymbol = st.text_input("Trading symbol (exact) - (e.g. RELIANCE)", value="RELIANCE").strip().upper()
     instrument_token = st.text_input("Instrument token (numeric) - optional", value="")
     exposure = st.number_input("Exposure (₹)", value=DEFAULT_EXPOSURE)
     leverage = st.number_input("Leverage (auto MIS)", value=DEFAULT_LEVERAGE, step=1)
     sl_pct = st.number_input("Initial SL %", value=DEFAULT_SL_PCT, step=0.1)
     instant_sl_pct = st.number_input("Instant SL %", value=DEFAULT_INSTANT_SL_PCT, step=0.1)
     trail_pct = st.number_input("Trailing % after breakeven", value=DEFAULT_TRAIL_PCT, step=0.1)
-    start_time = st.time_input("Auto start time (IST)", value=DEFAULT_START_TIME)
-    squareoff_time = st.time_input("Square-off time (IST)", value=DEFAULT_SQUAREOFF)
+    start_time = st.time_input("Auto start time (IST) - visible", value=DEFAULT_START_TIME)
+    squareoff_time = st.time_input("Square-off time (IST) - visible", value=DEFAULT_SQUAREOFF)
     sim_ltp = st.number_input("Paper sim LTP", value=100.0)
     auto_start = st.checkbox("Auto-start when token present", value=False)
 
-with right:
-    st.subheader("Controls")
+with right_col:
+    st.subheader("Controls & Live P&L (chart BELOW)")
+    # buttons
     if st.button("Start Engine (manual)"):
         cfg = {'exchange':exchange,'tradingsymbol':tradingsymbol,'instrument_token':instrument_token,'exposure':exposure,'leverage':leverage,'sl_pct':sl_pct,'instant_sl_pct':instant_sl_pct,'trail_pct':trail_pct,'start_time':start_time,'squareoff_time':squareoff_time,'sim_ltp':sim_ltp}
         eng = TradingEngine(kite if (mode=="Live" and kite_connected) else None, broker=PaperBroker() if mode=="Paper" else None, cfg=cfg)
@@ -721,35 +683,32 @@ with right:
         log("Emergency STOP executed")
         st.error("Emergency STOP executed")
 
-st.markdown("---")
-
-# Chart + P&L area
-chart_col, info_col = st.columns([3,1])
-with chart_col:
-    st.subheader("Live 5-min Candle Chart (last 30 minutes) — auto updates every 5s")
-    chart_placeholder = st.empty()
-with info_col:
-    st.subheader("Live P&L & Status")
+    st.markdown("---")
+    # P&L area shown above chart per user's request
     pnl_box = st.empty()
     status_box = st.empty()
     logs_box = st.empty()
 
-# Chart worker thread
+# Chart area: BELOW the P&L (rendered in right column area below)
+chart_placeholder = st.empty()
+
+# Chart updater thread (maintains chart_df and renders P&L & chart)
 def chart_worker():
-    # initialize chart_df
+    # initialize if missing
     if "chart_df" not in st.session_state:
         now = tz_now()
         times = [now - timedelta(minutes=5*(CANDLES_COUNT - i)) for i in range(CANDLES_COUNT)]
         base = float(st.session_state.get("sim_ltp", sim_ltp))
         prices = base * (1 + np.random.normal(0,0.0015,CANDLES_COUNT))
         st.session_state["chart_df"] = pd.DataFrame({'time':times,'open':prices,'high':prices*(1+0.001),'low':prices*(1-0.001),'close':prices,'volume':np.random.randint(100,1000,CANDLES_COUNT)})
+
     while True:
         try:
             df = st.session_state.get("chart_df")
             now = tz_now()
             bucket = now.replace(second=0,microsecond=0,minute=(now.minute//5)*5)
             ltp_val = None
-            if st.session_state.get("mode") == "Live" and kite and tradingsymbol:
+            if st.session_state.get("mode") == "Live" and KITE_AVAILABLE and kite and tradingsymbol:
                 try:
                     ref = f"{exchange}:{tradingsymbol}"
                     d = kite.ltp(ref)
@@ -759,7 +718,8 @@ def chart_worker():
                     ltp_val = None
             if ltp_val is None:
                 ltp_val = float(st.session_state.get("sim_ltp", sim_ltp)) * (1 + np.random.normal(0,0.0008))
-            # update or append candle
+
+            # update last candle or append new
             if not df.empty and df.iloc[-1]['time'] == bucket:
                 i = df.index[-1]
                 df.at[i,'high'] = max(df.at[i,'high'], ltp_val)
@@ -769,6 +729,7 @@ def chart_worker():
             else:
                 new = {'time':bucket,'open':ltp_val,'high':ltp_val,'low':ltp_val,'close':ltp_val,'volume':1}
                 df = pd.concat([df, pd.DataFrame([new])], ignore_index=True).tail(CANDLES_COUNT)
+
             # VWAP
             typical = (df['high'] + df['low'] + df['close'])/3.0
             df['cum_vol'] = df['volume'].cumsum()
@@ -776,9 +737,9 @@ def chart_worker():
             df['vwap'] = df['cum_vp'] / df['cum_vol']
             st.session_state["chart_df"] = df
 
-            # build chart
+            # Plotly chart
             fig = go.Figure(data=[go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='candles')])
-            fig.add_trace(go.Scatter(x=df['time'], y=df['vwap'], name='VWAP', mode='lines'))
+            fig.add_trace(go.Scatter(x=df['time'], y=df['vwap'], name='VWAP', mode='lines', line=dict(width=2, dash='solid')))
             eng = st.session_state.get("engine")
             if eng:
                 ep = getattr(eng,'entry_price', None)
@@ -791,13 +752,9 @@ def chart_worker():
                     fig.add_hline(y=sl, line_dash="dash", line_color="red", annotation_text="SL", annotation_position="top left")
                 if inst:
                     fig.add_hline(y=inst, line_dash="dot", line_color="orange", annotation_text="Instant SL", annotation_position="top left")
-            fig.update_layout(xaxis_rangeslider_visible=False, template='plotly_dark', height=520, margin=dict(l=10,r=10,t=30,b=10))
-            try:
-                chart_placeholder.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                log(f"chart render error: {e}")
+            fig.update_layout(xaxis_rangeslider_visible=False, template='plotly_dark', height=420, margin=dict(l=10,r=10,t=10,b=10))
 
-            # P&L & status
+            # Render P&L (above) and chart (below)
             eng = st.session_state.get("engine")
             if eng and getattr(eng,'entry_price', None):
                 ltp_now = eng.get_ltp(f"{eng.cfg.get('exchange','NSE')}:{eng.cfg.get('tradingsymbol')}")
@@ -833,60 +790,64 @@ def chart_worker():
                     pnl_box.text("No active position")
                     status_box.text("Mode: " + str(st.session_state.get("mode")))
 
-            logs_box.text_area("Logs", value="\n".join(st.session_state.get("logs", [])[-400:]), height=300)
+            # Render chart under P&L area
+            try:
+                chart_placeholder.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                log(f"chart render error: {e}")
+
+            logs_box.text_area("Logs", value="\n".join(st.session_state.get("logs", [])[-400:]), height=250)
         except Exception as e:
             log(f"chart_worker exception: {e}")
-        time.sleep(CHART_INTERVAL)
+        time.sleep(CHART_REFRESH_SEC)
 
 if 'chart_thread' not in st.session_state:
     st.session_state['chart_thread'] = threading.Thread(target=chart_worker, daemon=True)
     st.session_state['chart_thread'].start()
 
-# Auto-start function
+# Auto-start logic (if enabled)
 def maybe_auto_start():
-    if auto_start and access_available and st.session_state.get("mode") == "Live" and kite:
-        now = tz_now()
-        if now.time() >= start_time and now.time() <= (datetime.combine(now.date(), start_time) + timedelta(minutes=30)).time():
-            if not st.session_state.get("engine"):
-                cfg = {'exchange':exchange,'tradingsymbol':tradingsymbol,'instrument_token':instrument_token,'exposure':exposure,'leverage':leverage,'sl_pct':sl_pct,'instant_sl_pct':instant_sl_pct,'trail_pct':trail_pct,'start_time':start_time,'squareoff_time':squareoff_time,'sim_ltp':sim_ltp}
-                eng = TradingEngine(kite if st.session_state.get("mode")=="Live" else None, broker=PaperBroker() if st.session_state.get("mode")=="Paper" else None, cfg=cfg)
-                st.session_state["engine"] = eng
-                eng.start()
-                log("Auto-started engine")
-                send_sms("Engine auto-started")
+    try:
+        if auto_start and access_available and st.session_state.get("mode") == "Live" and kite:
+            now = tz_now()
+            if now.time() >= start_time and now.time() <= (datetime.combine(now.date(), start_time) + timedelta(minutes=30)).time():
+                if not st.session_state.get("engine"):
+                    cfg = {'exchange':exchange,'tradingsymbol':tradingsymbol,'instrument_token':instrument_token,'exposure':exposure,'leverage':leverage,'sl_pct':sl_pct,'instant_sl_pct':instant_sl_pct,'trail_pct':trail_pct,'start_time':start_time,'squareoff_time':squareoff_time,'sim_ltp':sim_ltp}
+                    eng = TradingEngine(kite if st.session_state.get("mode")=="Live" else None, broker=PaperBroker() if st.session_state.get("mode")=="Paper" else None, cfg=cfg)
+                    st.session_state["engine"] = eng
+                    st.session_state["trading_active"] = True
+                    eng.start()
+                    log("Auto-started engine")
+                    send_sms("Engine auto-started")
+    except Exception:
+        pass
 
-try:
-    maybe_auto_start()
-except Exception:
-    pass
+maybe_auto_start()
 
 # Safety flatten at 15:20
 def safety_flatten_check():
-    now = tz_now()
-    if now.time() >= dtime(15,20):
-        log("15:20 safety flatten triggered")
-        eng = st.session_state.get("engine")
-        if eng:
-            try:
-                eng.cancel_all_pending()
-            except Exception:
-                pass
-            try:
-                eng.exit_all_positions()
-            except Exception:
-                pass
-            eng.stop()
-        st.session_state["trading_active"] = False
-        send_sms("⚠️ Auto safety flatten executed at 15:20 IST")
-        st.warning("15:20 Safety Flatten executed - all pending orders cancelled and positions exited.")
+    try:
+        if tz_now().time() >= dtime(15,20):
+            log("15:20 safety flatten triggered")
+            eng = st.session_state.get("engine")
+            if eng:
+                try:
+                    eng.cancel_all_pending()
+                except Exception:
+                    pass
+                try:
+                    eng.exit_all_positions()
+                except Exception:
+                    pass
+                eng.stop()
+            st.session_state["trading_active"] = False
+            send_sms("⚠️ Auto safety flatten executed at 15:20 IST")
+            st.warning("15:20 Safety Flatten executed - all pending orders cancelled and positions exited.")
+    except Exception:
+        pass
 
-try:
-    safety_flatten_check()
-except Exception:
-    pass
+safety_flatten_check()
 
 st.markdown("---")
-st.caption("Test in Paper mode first. Generate access token in sidebar for Live mode. Replace Fast2SMS key & number in sidebar to receive SMS.")
-
-# EOF
+st.caption("If some UI elements still appear hidden on your device, tell me which element and I will adjust layout. Always test in PAPER mode first.")
 
