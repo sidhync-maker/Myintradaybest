@@ -57,8 +57,8 @@ def now_str():
 
 # --------------- CONFIG ---------------
 ACCESS_TOKEN_FILE = "access_token.json"
-FAST2SMS_PLACEHOLDER = "PUT_FAST2SMS_KEY_HERE"
-FAST2SMS_DEFAULT_NUMBER = ""
+FAST2SMS_PLACEHOLDER = "o0EQRX69hWSDnCP2awiTtxvdFMeAZLOgUj1slcNbBrqf3z4GIJBVfSov8laJ7eET160iZCOrHbchKI4G"
+FAST2SMS_DEFAULT_NUMBER = "918301844858"
 DEFAULT_EXPOSURE = 50000.0
 DEFAULT_LEVERAGE = 5
 DEFAULT_SL_PCT = 3.0
@@ -585,14 +585,14 @@ if 'clock_thread_v6' not in st.session_state:
     st.session_state['clock_thread_v6'].start()
 
 # Header & info
-st.title("🟦 Auto Intraday Trader — v6 Colourful")
+st.title("🟦 Auto Intraday Trader — v6")
 st.markdown("**Test in PAPER mode first.** Sidebar → paste Kite request_token & Fast2SMS key. Chart & clock auto-update every 5s.")
 
 # Sidebar content
 with st.sidebar:
     st.header("🔐 Connection & Alerts")
-    api_key = st.text_input("Kite API Key", value=os.getenv("ZK_API_KEY",""), type="password")
-    api_secret = st.text_input("Kite API Secret", value=os.getenv("ZK_API_SECRET",""), type="password")
+    api_key = st.text_input("Kite API Key", value=os.getenv("ZK_API_KEY","t32mq5t5xgnjdtni"), type="password")
+    api_secret = st.text_input("Kite API Secret", value=os.getenv("ZK_API_SECRET","xf9jfyfvmqo408m52l4u2gpyo34fcsfe"), type="password")
     st.markdown("1) Click Kite Login URL (if visible)  → Login → copy `request_token` from redirect URL → paste below")
     if KITE_AVAILABLE and api_key:
         try:
