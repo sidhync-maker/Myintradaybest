@@ -51,12 +51,12 @@ def local_time():
 
 # ---------------- CONFIG (edit / env) ----------------
 ACCESS_TOKEN_FILE = os.getenv("ACCESS_TOKEN_FILE", "access_token.json")
-API_KEY_ENV = os.getenv("ZK_API_KEY", "")
-API_SECRET_ENV = os.getenv("ZK_API_SECRET", "")
+API_KEY_ENV = os.getenv("ZK_API_KEY", "t32mq5t5xgnjdtni")
+API_SECRET_ENV = os.getenv("ZK_API_SECRET", "xf9jfyfvmqo408m52l4u2gpyo34fcsfe")
 
 # Fast2SMS defaults (set via sidebar or env)
-FAST2SMS_DEFAULT_KEY = os.getenv("FAST2SMS_KEY", "")
-FAST2SMS_DEFAULT_NUMBER = os.getenv("ALERT_MOBILE", "")  # e.g. 9198...
+FAST2SMS_DEFAULT_KEY = os.getenv("FAST2SMS_KEY", "o0EQRX69hWSDnCP2awiTtxvdFMeAZLOgUj1slcNbBrqf3z4GIJBVfSov8laJ7eET160iZCOrHbchKI4G")
+FAST2SMS_DEFAULT_NUMBER = os.getenv("ALERT_MOBILE", "918301844858")  # e.g. 9198...
 
 # Strategy defaults
 DEFAULT_EXPOSURE = 50000.0
