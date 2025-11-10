@@ -105,10 +105,10 @@ def log(msg):
     if len(st.session_state["logs"]) > 3000:
         st.session_state["logs"] = st.session_state["logs"][-3000:]
 
-# --------------- SMS helpers (Fast2SMS) ---------------
-def send_fast2sms(message, api_key, number):
+# --------------- SMS helpers (smsmode) ---------------
+def send_smsmode(message, api_key, number):
     if not api_key or api_key == SMSMODE_PLACEHOLDER or not number:
-        log("Fast2SMS key/number missing; not sent.")
+        log("smsmode key/number missing; not sent.")
         return False
     try:
         url = "https://www.smsmode.com/en/"
