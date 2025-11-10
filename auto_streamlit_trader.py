@@ -95,9 +95,9 @@ if "engine" not in st.session_state:
 if "trading_active" not in st.session_state:
     st.session_state["trading_active"] = False
 if "smsmode_key" not in st.session_state:
-    st.session_state["smsmost.session_SMSMODE_PLACEHOLDER
+    st.session_state["smsmode_key"] = session_SMSMODE_PLACEHOLDER
 if "sms_number" not in st.session_state:
-    st.session_state["sms_nst.session_SMSMODE_DEFAULT_NUMBER
+    st.session_state["sms_number"] = session_SMSMODE_DEFAULT_NUMBER
 
 def log(msg):
     ts = now_str()
