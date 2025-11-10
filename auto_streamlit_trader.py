@@ -533,95 +533,107 @@ class TradingEngine(threading.Thread):
 st.set_page_config(page_title="Auto Intraday Trader", layout="wide")
 # Minimal dark CSS
 # ======= Contrast / Readability CSS (paste after st.set_page_config(...)) =======
-st.markdown(
-    """
-    <style>
-    /* app dark background */
-    .stApp { background: #071221; color: #e6eef6; }
+# ======= Streamlit Theme: Dark Blue Main + Black Sidebar =======
+st.markdown("""
+<style>
+/* Main app background */
+.stApp {
+    background-color: #001F3F !important;  /* dark blue */
+    color: #ffffff !important;  /* white text */
+}
 
-    /* Headings / labels: always white & bold on dark backgrounds */
-    h1, h2, h3, h4, h5, h6, label, .css-1r6slb0, .stMarkdown, .stText { color: #ffffff !important; font-weight:700 !important; }
+/* App title or headings in dark yellow */
+h1, h2, h3, h4, h5, h6 {
+    color: #FFD700 !important;  /* dark yellow */
+    font-weight: 800 !important;
+}
 
-    /* Input fields, selects, numbers, password, textarea: make background WHITE and text BLACK & bold for readability */
-    input[type="text"], input[type="password"], input[type="number"], textarea,
-    .stTextInput > div > input, .stTextInput > div > textarea,
-    .stNumberInput input, .stNumberInput, .stSelectbox, .stSelectbox > div > div,
-    .stMultiSelect, .stDateInput input, .stTimeInput input {
-        background: #ffffff !important;
-        color: #000000 !important;
-        font-weight:700 !important;
-        border-radius: 6px !important;
-    }
+/* All other labels, text, markdown */
+label, p, span, div, .stMarkdown {
+    color: #ffffff !important;
+    font-weight: 700 !important;
+}
 
-    /* Placeholder text darker grey so it's readable */
-    ::-webkit-input-placeholder { color: #6b6b6b !important; opacity: 1 !important; }
-    :-ms-input-placeholder { color: #6b6b6b !important; }
-    ::placeholder { color: #6b6b6b !important; }
+/* Main page input fields and buttons */
+input[type="text"], input[type="password"], input[type="number"], textarea,
+.stTextInput > div > input, .stTextInput > div > textarea,
+.stNumberInput input, .stSelectbox, .stSelectbox > div > div,
+.stMultiSelect, .stDateInput input, .stTimeInput input {
+    background-color: #87CEEB !important;  /* sky blue */
+    color: #000000 !important;  /* black text */
+    font-weight: 700 !important;
+    border-radius: 6px !important;
+    border: 2px solid #004080 !important;
+}
 
-    /* Buttons: white background + black bold text for high contrast.
-       If you prefer dark buttons with white text, change background to #0b3a5b and color to #fff. */
-    .stButton>button {
-        background: #ffffff !important;
-        color: #000000 !important;
-        font-weight:700 !important;
-        border-radius: 6px !important;
-    }
+/* Main buttons */
+.stButton>button {
+    background-color: #87CEEB !important;  /* sky blue */
+    color: #000000 !important;  /* black bold text */
+    font-weight: 800 !important;
+    border: none !important;
+    border-radius: 8px !important;
+    transition: 0.2s ease-in-out;
+}
+.stButton>button:hover {
+    background-color: #5dbcd2 !important;
+}
 
-    /* Make select/combobox popups legible */
-    .stSelectbox > div[role="combobox"] > div { background: #ffffff !important; color: #000 !important; }
+/* Sidebar background */
+[data-testid="stSidebar"] {
+    background-color: #000000 !important;  /* black */
+}
 
-    /* Make sidebar inputs readable too */
-    .sidebar .stTextInput input, .sidebar .stNumberInput input, .sidebar .stSelectbox > div > div {
-        background: #071221 !important;
-        color: #e6eef6 !important;
-        font-weight:700 !important;
-    }
+/* Sidebar text */
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] div {
+    color: #ffffff !important; /* white text for readability */
+    font-weight: 700 !important;
+}
 
-    /* Logger / text areas: keep dark but use light text */
-    textarea, .stTextArea>div>textarea { background: #0b1620 !important; color: #e6eef6 !important; font-weight:600 !important; }
+/* Sidebar input fields */
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] select,
+[data-testid="stSidebar"] textarea {
+    background-color: #ffffff !important;  /* white field */
+    color: #000000 !important;  /* black text */
+    font-weight: 700 !important;
+    border-radius: 6px !important;
+    border: 1px solid #999999 !important;
+}
 
-    /* Ensure small labels near widgets are readable */
-    .css-1v3fvcr { color: #ffffff !important; font-weight:700 !important; }
+/* Sidebar buttons */
+[data-testid="stSidebar"] button {
+    background-color: #ffffff !important;  /* white button */
+    color: #000000 !important;  /* black bold text */
+    font-weight: 800 !important;
+    border: 1px solid #999999 !important;
+    border-radius: 6px !important;
+}
+[data-testid="stSidebar"] button:hover {
+    background-color: #e6e6e6 !important;
+}
 
-    /* Plotly charts keep dark theme, no change */
-    .plotly-graph-div { background: transparent !important; }
+/* P&L colors */
+.profit { color: #00FF00 !important; font-weight: 700 !important; }
+.loss { color: #FF0000 !important; font-weight: 700 !important; }
+.neutral { color: #1E90FF !important; font-weight: 700 !important; }
 
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-# ======================================================================
+/* Placeholder readability */
+::placeholder { color: #333333 !important; }
 
+/* Chart transparency */
+.plotly-graph-div { background: transparent !important; }
 
-st.title("🔁 Auto Intraday Trader")
+</style>
+""", unsafe_allow_html=True)
+# ===============================================================
 
-# Sidebar for KITE & SMS
-with st.sidebar:
-    st.header("Kite & SMS")
-    api_key = st.text_input("Kite API Key (paste or set env)", value=os.getenv("ZK_API_KEY",""), type="password")
-    api_secret = st.text_input("Kite API Secret", value=os.getenv("ZK_API_SECRET",""), type="password")
-    st.markdown("1) Click the Kite login URL -> login -> copy request_token from redirect URL -> paste below")
-    if KITE_AVAILABLE and api_key:
-        try:
-            temp = KiteConnect(api_key=api_key)
-            st.code(temp.login_url())
-        except Exception as e:
-            st.write("Unable to build login URL:", e)
-    else:
-        if not KITE_AVAILABLE:
-            st.warning("kiteconnect not installed; Live mode disabled.")
-    request_token = st.text_input("Paste request_token here", value="")
-    if st.button("Generate & Save Access Token"):
-        if not (api_key and api_secret and request_token):
-            st.error("Provide API Key, Secret, and request_token")
-        else:
-            try:
-                tmp = KiteConnect(api_key=api_key)
-                data = tmp.generate_session(request_token.strip(), api_secret=api_secret.strip())
-                safe_save_json(ACCESS_TOKEN_FILE, data)
-                st.success("Access token saved")
-                log("Access token saved")
-                send_sms("Access token generated & saved.")
+Access token generated & saved.")
             except Exception as e:
                 st.error(f"Token gen failed: {e}")
                 log(f"Token gen failed: {e}")
