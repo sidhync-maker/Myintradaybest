@@ -13,7 +13,7 @@ Auto Intraday Streamlit Trader — Final v6 (Colourful Edition)
     -> Exit/Close triggered positions
     -> Send SMS alert
 - Reject protection: if an order is rejected -> don't retry, cancel pending, alert & stop trading
-- Fast2SMS integration (placeholder key)
+- smsmode integration (placeholder key)
 - Safe access_token file handling (manual request_token once/day)
 - Auto square-off at 15:15 & Safety flatten at 15:20
 - Colorful theme & high-contrast UI for readability
@@ -57,8 +57,8 @@ def now_str():
 
 # --------------- CONFIG ---------------
 ACCESS_TOKEN_FILE = "access_token.json"
-FAST2SMS_PLACEHOLDER = "o0EQRX69hWSDnCP2awiTtxvdFMeAZLOgUj1slcNbBrqf3z4GIJBVfSov8laJ7eET160iZCOrHbchKI4G"
-FAST2SMS_DEFAULT_NUMBER = "918301844858"
+SMSMODE_PLACEHOLDER = "lSM729pwrgHkstIIHqVrJZzDn6mpQzMg"
+SMSMODE_DEFAULT_NUMBER = "918301844858"
 DEFAULT_EXPOSURE = 50000.0
 DEFAULT_LEVERAGE = 5
 DEFAULT_SL_PCT = 3.0
@@ -94,8 +94,8 @@ if "engine" not in st.session_state:
     st.session_state["engine"] = None
 if "trading_active" not in st.session_state:
     st.session_state["trading_active"] = False
-if "fast2sms_key" not in st.session_state:
-    st.session_state["fast2sms_key"] = FAST2SMS_PLACEHOLDER
+if "smsmode_key" not in st.session_state:
+    st.session_state["smsmode_key"] = FAST2SMS_PLACEHOLDER
 if "sms_number" not in st.session_state:
     st.session_state["sms_number"] = FAST2SMS_DEFAULT_NUMBER
 
@@ -107,13 +107,13 @@ def log(msg):
 
 # --------------- SMS helpers (Fast2SMS) ---------------
 def send_fast2sms(message, api_key, number):
-    if not api_key or api_key == FAST2SMS_PLACEHOLDER or not number:
+    if not api_key or api_key == SMSMODE_PLACEHOLDER or not number:
         log("Fast2SMS key/number missing; not sent.")
         return False
     try:
-        url = "https://www.fast2sms.com/dev/bulkV2"
+        url = "https://www.smsmode.com/en/"
         payload = {
-            "sender_id": "FSTSMS",
+            "sender_id": "SMSMODE",
             "message": message,
             "language": "english",
             "route": "v3",
@@ -121,14 +121,14 @@ def send_fast2sms(message, api_key, number):
         }
         headers = {'authorization': api_key}
         r = requests.post(url, data=payload, headers=headers, timeout=10)
-        log(f"Fast2SMS status={r.status_code} msg={message[:80]}")
+        log(f"SMSMODE status={r.status_code} msg={message[:80]}")
         return r.status_code == 200
     except Exception as e:
-        log(f"Fast2SMS error: {e}")
+        log(f"SMSMODE error: {e}")
         return False
 
 def send_sms(message):
-    ok = send_fast2sms(message, st.session_state.get("fast2sms_key"), st.session_state.get("sms_number"))
+    ok = send_smsmode(message, st.session_state.get("smsmode_key"), st.session_state.get("sms_number"))
     if not ok:
         log("SMS failed (check key/number).")
     return ok
@@ -620,11 +620,11 @@ with st.sidebar:
                 log(f"Token gen failed: {e}")
 
     st.markdown("---")
-    st.subheader("📲 Fast2SMS")
-    fastkey = st.text_input("Fast2SMS API Key", value=st.session_state.get("fast2sms_key", FAST2SMS_PLACEHOLDER), type="password")
-    sms_number = st.text_input("Alert mobile (with country code, e.g., 9198...)", value=st.session_state.get("sms_number", FAST2SMS_DEFAULT_NUMBER))
+    st.subheader("📲 SMSMODE")
+    fastkey = st.text_input("SMSMODE API Key", value=st.session_state.get("smsmode_key", SMSMODE_PLACEHOLDER), type="password")
+    sms_number = st.text_input("Alert mobile (with country code, e.g., 9198...)", value=st.session_state.get("sms_number", SMSMODE_DEFAULT_NUMBER))
     if st.button("Save SMS settings"):
-        st.session_state["fast2sms_key"] = fastkey
+        st.session_state["smsmode_key"] = fastkey
         st.session_state["sms_number"] = sms_number
         st.success("SMS settings saved")
         log("SMS settings saved")
