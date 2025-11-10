@@ -632,7 +632,35 @@ input[type="text"], input[type="password"], input[type="number"], textarea,
 </style>
 """, unsafe_allow_html=True)
 # ===============================================================
+st.title("🔁 Auto Intraday MIS Trader — Live Chart (5s)")
 
+# Sidebar for KITE & SMS
+with st.sidebar:
+    st.header("Kite & SMS")
+    api_key = st.text_input("Kite API Key (paste or set env)", value=os.getenv("ZK_API_KEY",""), type="password")
+    api_secret = st.text_input("Kite API Secret", value=os.getenv("ZK_API_SECRET",""), type="password")
+    st.markdown("1) Click the Kite login URL -> login -> copy request_token from redirect URL -> paste below")
+    if KITE_AVAILABLE and api_key:
+        try:
+            temp = KiteConnect(api_key=api_key)
+            st.code(temp.login_url())
+        except Exception as e:
+            st.write("Unable to build login URL:", e)
+    else:
+        if not KITE_AVAILABLE:
+            st.warning("kiteconnect not installed; Live mode disabled.")
+    request_token = st.text_input("Paste request_token here", value="")
+    if st.button("Generate & Save Access Token"):
+        if not (api_key and api_secret and request_token):
+            st.error("Provide API Key, Secret, and request_token")
+        else:
+            try:
+                tmp = KiteConnect(api_key=api_key)
+                data = tmp.generate_session(request_token.strip(), api_secret=api_secret.strip())
+                safe_save_json(ACCESS_TOKEN_FILE, data)
+                st.success("Access token saved")
+                log("Access token saved")
+                send_sms("
 Access token generated & saved.")
             except Exception as e:
                 st.error(f"Token gen failed: {e}")
