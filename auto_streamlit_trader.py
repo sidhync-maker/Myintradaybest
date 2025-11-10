@@ -1,21 +1,23 @@
-# auto_intraday_streamlit_pro.py
+# auto_intraday_streamlit_live_chart.py
 """
-Auto Intraday Streamlit Trader — PRO (final)
-- Zerodha Kite Connect (manual request_token once/day; saves access token; SMS alert on expiry)
-- Manual stock selector (default RELIANCE)
-- Intraday MIS trading with 5x leverage auto-quantity
+Auto Intraday Streamlit Trader — LIVE CHART + Digital Clock (updated)
+Full feature set:
+- Manual request_token once/day -> saved to access token file (auto-save)
+- SMS alert when token expired (Fast2SMS)
+- Manual stock selector
+- Intraday MIS with 5x leverage auto-quantity
 - Paper / Live mode (manual toggle)
-- Manual Start, Manual Stop, Emergency STOP (flatten & cancel)
+- Manual Start, Manual Stop, Emergency STOP (flatten + cancel)
 - Instant SL, Initial SL, Trailing SL
-- If SL hit or stop pressed -> cancel all untriggered orders + exit triggered positions
-- Live P&L display (color-coded)
-- Live 5-minute candlestick chart for last 30 minutes (6 candles) with VWAP + markers
-- Digital clock (IST) displayed
-- Dark background theme (except entry fields)
-- Kite connected & access-token indicators (green/red dot)
-- Auto-start option (if enabled & conditions met)
-- Fast2SMS alerts (placeholder key included)
-- 15:15 square-off and 15:20 safety flatten watchdog
+- On SL / stop pressed -> cancel untriggered + exit triggered
+- Rejection protection: if buy order rejected -> no retry, cancel pending + SMS alert
+- Live P&L color display
+- Live 5-min candle chart (last 30 minutes = 6 candles) updated from Kite LTP every 5s
+- Digital clock (IST)
+- Dark background, white/bold labels as requested
+- Kite connected & access token status indicators (green/red dot)
+- Auto-start option
+- 15:15 square-off & 15:20 safety flatten watchdog
 """
 
 import os
@@ -31,7 +33,7 @@ import numpy as np
 import plotly.graph_objects as go
 import requests
 
-# optional kite import
+# Kite optional import
 try:
     from kiteconnect import KiteConnect
     KITE_AVAILABLE = True
@@ -39,7 +41,7 @@ except Exception:
     KiteConnect = None
     KITE_AVAILABLE = False
 
-# -------------------- TIMEZONE (IST) --------------------
+# ------------------------- TIMEZONE (IST) -------------------------
 try:
     from zoneinfo import ZoneInfo
     IST = ZoneInfo("Asia/Kolkata")
@@ -56,15 +58,10 @@ def local_time():
 def now_str():
     return local_now().strftime("%Y-%m-%d %H:%M:%S")
 
-# -------------------- CONFIG DEFAULTS --------------------
-ACCESS_TOKEN_FILE = os.getenv("ACCESS_TOKEN_FILE", "access_token.json")
-API_KEY_ENV = os.getenv("ZK_API_KEY", "")
-API_SECRET_ENV = os.getenv("ZK_API_SECRET", "")
-
-# Fast2SMS placeholder (user replaces with real key in sidebar)
+# ------------------------- CONFIG DEFAULTS -------------------------
+ACCESS_TOKEN_FILE = "access_token.json"   # saved kite.generate_session output
 FAST2SMS_API_KEY_PLACEHOLDER = "your_fast2sms_key_here"
-FAST2SMS_DEFAULT_NUMBER = os.getenv("FAST2SMS_NUMBER", "")
-
+FAST2SMS_DEFAULT_NUMBER = ""  # replace in sidebar
 DEFAULT_EXPOSURE = 50000.0
 DEFAULT_LEVERAGE = 5
 DEFAULT_SL_PCT = 3.0
@@ -72,13 +69,12 @@ DEFAULT_INSTANT_SL_PCT = 1.5
 DEFAULT_TRAIL_PCT = 3.0
 DEFAULT_START_TIME = dtime(9,15)
 DEFAULT_SQUAREOFF = dtime(15,15)
-
-CANDLES_COUNT = 6  # last 30 minutes -> 6 candles (5-min each)
+CANDLES_COUNT = 6  # last 30 minutes -> 6 candles of 5-min
 ENGINE_SLEEP = 3
-CHART_REFRESH_SEC = 6
-CLOCK_REFRESH_SEC = 1
+CHART_UPDATE_SEC = 5
+CLOCK_UPDATE_SEC = 1
 
-# -------------------- UTILITIES --------------------
+# ------------------------- UTILS -------------------------
 def safe_load_json(path):
     try:
         if os.path.exists(path) and os.path.getsize(path) > 0:
@@ -92,22 +88,19 @@ def safe_save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, default=str, indent=2)
 
-# simple logger stored in session_state
+# logging in session
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
 
 def log(msg):
-    ts = now_str()
-    entry = f"[{ts}] {msg}"
-    st.session_state["logs"].append(entry)
-    # keep last 500 lines
-    if len(st.session_state["logs"]) > 500:
-        st.session_state["logs"] = st.session_state["logs"][-500:]
+    st.session_state["logs"].append(f"[{now_str()}] {msg}")
+    if len(st.session_state["logs"]) > 1000:
+        st.session_state["logs"] = st.session_state["logs"][-1000:]
 
-# -------------------- SMS (Fast2SMS) --------------------
+# SMS helpers (Fast2SMS)
 def send_fast2sms(message, api_key, number):
     if not api_key or not number:
-        log("Fast2SMS: missing key/number — SMS not sent.")
+        log("Fast2SMS missing key/number; SMS not sent.")
         return False
     try:
         url = "https://www.fast2sms.com/dev/bulkV2"
@@ -120,7 +113,7 @@ def send_fast2sms(message, api_key, number):
         }
         headers = {'authorization': api_key}
         r = requests.post(url, data=payload, headers=headers, timeout=10)
-        log(f"Fast2SMS status={r.status_code} for message: {message[:60]}")
+        log(f"Fast2SMS status={r.status_code} for message: {message[:80]}")
         return r.status_code == 200
     except Exception as e:
         log(f"Fast2SMS error: {e}")
@@ -131,13 +124,13 @@ def send_sms(message):
     num = st.session_state.get("sms_number") or FAST2SMS_DEFAULT_NUMBER
     ok = send_fast2sms(message, key, num)
     if not ok:
-        log("SMS failed — check Fast2SMS key & number.")
+        log("SMS failed (check key/number).")
     return ok
 
-# -------------------- PAPER BROKER --------------------
+# ------------------------- PAPER BROKER -------------------------
 class PaperBroker:
     def __init__(self):
-        self.positions = {}   # symbol -> {'qty', 'avg'}
+        self.positions = {}
         self.orders = {}
         self._next = 1
     def _oid(self):
@@ -150,7 +143,7 @@ class PaperBroker:
         total_qty = pos['qty'] + qty
         avg = price if pos['qty']==0 else (pos['avg']*pos['qty'] + price*qty)/total_qty
         self.positions[symbol] = {'qty': total_qty, 'avg': avg}
-        self.orders[oid] = {'id':oid, 'type':'BUY', 'symbol':symbol, 'qty':qty, 'price':price, 'status':'FILLED'}
+        self.orders[oid] = {'id':oid, 'type':'BUY','symbol':symbol,'qty':qty,'price':price,'status':'FILLED'}
         log(f"[Paper] BUY {symbol} qty={qty} @ {price} (id={oid})")
         return oid
     def place_market_sell(self, symbol, qty, price):
@@ -161,14 +154,14 @@ class PaperBroker:
         if pos['qty']==0:
             pos['avg'] = 0.0
         self.positions[symbol] = pos
-        self.orders[oid] = {'id':oid, 'type':'SELL', 'symbol':symbol, 'qty':sell_qty, 'price':price, 'status':'FILLED'}
+        self.orders[oid] = {'id':oid,'type':'SELL','symbol':symbol,'qty':sell_qty,'price':price,'status':'FILLED'}
         log(f"[Paper] SELL {symbol} qty={sell_qty} @ {price} (id={oid})")
         return oid
     def get_positions(self):
-        rows = []
+        rows=[]
         for s,p in self.positions.items():
             if p['qty']!=0:
-                rows.append({'tradingsymbol':s, 'quantity':p['qty'], 'avg_price':p['avg'], 'pnl':0.0})
+                rows.append({'tradingsymbol':s,'quantity':p['qty'],'avg_price':p['avg'],'pnl':0.0})
         return rows
     def cancel_all(self):
         cancelled = list(self.orders.keys())
@@ -176,7 +169,7 @@ class PaperBroker:
         log(f"[Paper] Cancelled orders: {cancelled}")
         return cancelled
     def close_all(self):
-        closed = []
+        closed=[]
         for s,p in list(self.positions.items()):
             if p['qty']!=0:
                 closed.append({'symbol':s,'qty':p['qty']})
@@ -184,7 +177,40 @@ class PaperBroker:
                 self.positions[s] = {'qty':0,'avg':0.0}
         return closed
 
-# -------------------- TRADING ENGINE --------------------
+# ------------------------- ORDER REJECTION HANDLER -------------------------
+def handle_order_rejection_and_cleanup(kite, order_id, symbol):
+    """
+    Check if the provided order_id was rejected; if rejected -> cancel all pending, send sms, return True.
+    This checks kite.orders() for matching order_id and status 'REJECTED' (or similar).
+    """
+    try:
+        if not kite:
+            return False
+        orders = kite.orders()
+        # find the order
+        for o in orders:
+            if str(o.get("order_id")) == str(order_id):
+                status = (o.get("status") or "").upper()
+                if "REJECT" in status or "CANCELLED" in status and o.get("status_message",""):
+                    reason = o.get("status_message") or status
+                    # Cancel all pending/untriggered orders
+                    for p in orders:
+                        p_status = (p.get("status") or "").upper()
+                        if p_status in ("OPEN", "TRIGGER PENDING", "PENDING", "VALIDATION PENDING"):
+                            try:
+                                kite.cancel_order(order_id=p['order_id'], variety=p.get('variety', kite.VARIETY_REGULAR))
+                            except Exception as e:
+                                log(f"Failed cancel {p.get('order_id')}: {e}")
+                    # Send SMS alert
+                    send_sms(f"⚠️ ORDER REJECTED for {symbol}. Reason: {reason}. Pending orders cancelled.")
+                    log(f"Order {order_id} rejected: {reason}. Pending cancelled.")
+                    return True
+        return False
+    except Exception as e:
+        log(f"handle_order_rejection error: {e}")
+        return False
+
+# ------------------------- TRADING ENGINE -------------------------
 class TradingEngine(threading.Thread):
     def __init__(self, kite=None, broker=None, cfg=None):
         super().__init__(daemon=True)
@@ -192,13 +218,14 @@ class TradingEngine(threading.Thread):
         self.broker = broker or PaperBroker()
         self.cfg = cfg or {}
         self._stop = threading.Event()
-        # runtime
+        # runtime state
         self.entry_price = None
         self.qty = 0
         self.entry_time = None
         self.sl_trigger = None
         self.instant_sl = None
         self.peak = None
+        self.last_buy_order_id = None
 
     def stop(self):
         self._stop.set()
@@ -226,12 +253,13 @@ class TradingEngine(threading.Thread):
             return float(self.cfg.get('sim_ltp', 100.0)) * (1 + np.random.normal(0, 0.001))
 
     def place_buy(self, exchange, tradingsymbol, qty, ltp):
-        # block if global stop
         if not st.session_state.get("trading_active", True):
-            log("Order blocked: trading halted (emergency/manual stop).")
+            log("Block BUY: trading halted.")
             return None
         if st.session_state.get("mode","Paper") == "Paper":
-            return self.broker.place_market_buy(tradingsymbol, qty, ltp)
+            oid = self.broker.place_market_buy(tradingsymbol, qty, ltp)
+            self.last_buy_order_id = oid
+            return oid
         else:
             try:
                 oid = self.kite.place_order(
@@ -243,43 +271,19 @@ class TradingEngine(threading.Thread):
                     product=self.kite.PRODUCT_MIS,
                     variety=self.kite.VARIETY_REGULAR
                 )
+                self.last_buy_order_id = oid
                 log(f"[Live] BUY placed id={oid} qty={qty}")
                 return oid
             except Exception as e:
                 log(f"[Live] BUY failed: {e}")
-                send_sms(f"BUY failed: {e}")
+                send_sms(f"BUY failed for {tradingsymbol}: {e}")
+                # do not retry; cancel pending and return None
+                try:
+                    # try cancel all pending
+                    self.cancel_all_orders()
+                except:
+                    pass
                 return None
-                
-# --------------------------------------------
-# Rejection Handling for Buy Orders
-# --------------------------------------------
-
-
-def handle_order_rejection(kite, order_id, trading_symbol):
-    """Cancel all pending orders and notify via SMS if any order is rejected."""
-    try:
-        orders = kite.orders()
-        for o in orders:
-            if o["order_id"] == order_id and o["status"].lower() == "rejected":
-                # Get rejection reason if available
-                reason = o.get("status_message", "Order rejected by exchange")
-                
-                # Cancel all pending/untriggered orders
-                for pending in orders:
-                    if pending["status"].lower() in ["trigger pending", "open", "validation pending"]:
-                        kite.cancel_order(variety=pending["variety"], order_id=pending["order_id"])
-                
-                # Send SMS alert
-                send_sms(f"⚠️ BUY ORDER REJECTED for {trading_symbol}. Reason: {reason}. "
-                         f"All pending orders cancelled.")
-
-                st.error(f"🚫 Order Rejected: {reason}")
-                return True  # indicates rejection handled
-        return False  # no rejection found
-    except Exception as e:
-        st.warning(f"Error checking rejection: {e}")
-        return False
-            
 
     def place_sell(self, exchange, tradingsymbol, qty, ltp):
         if st.session_state.get("mode","Paper") == "Paper":
@@ -299,7 +303,7 @@ def handle_order_rejection(kite, order_id, trading_symbol):
                 return oid
             except Exception as e:
                 log(f"[Live] SELL failed: {e}")
-                send_sms(f"SELL failed: {e}")
+                send_sms(f"SELL failed for {tradingsymbol}: {e}")
                 return None
 
     def cancel_all_orders(self):
@@ -308,19 +312,19 @@ def handle_order_rejection(kite, order_id, trading_symbol):
         else:
             try:
                 orders = self.kite.orders()
-                cancelled = []
+                cancelled=[]
                 for o in orders:
                     status = (o.get('status') or "").upper()
-                    if status in ('OPEN','TRIGGER PENDING','PENDING'):
+                    if status in ('OPEN','TRIGGER PENDING','PENDING','VALIDATION PENDING'):
                         try:
                             self.kite.cancel_order(order_id=o['order_id'], variety=o.get('variety', self.kite.VARIETY_REGULAR))
                             cancelled.append(o['order_id'])
                         except Exception as e:
                             log(f"Cancel failed {o.get('order_id')}: {e}")
-                log(f"Cancelled pending orders: {cancelled}")
+                log(f"Cancelled: {cancelled}")
                 return cancelled
             except Exception as e:
-                log(f"Cancel all orders error: {e}")
+                log(f"cancel_all_orders error: {e}")
                 return []
 
     def exit_all_positions(self):
@@ -330,12 +334,12 @@ def handle_order_rejection(kite, order_id, trading_symbol):
             try:
                 pos = self.kite.positions()
                 net = pos.get('net', []) if isinstance(pos, dict) else []
-                closed = []
+                closed=[]
                 for p in net:
                     qty = int(p.get('quantity', 0) or 0)
                     if qty == 0:
                         continue
-                    tx = self.kite.TRANSACTION_TYPE_SELL if qty > 0 else self.kite.TRANSACTION_TYPE_BUY
+                    tx = self.kite.TRANSACTION_TYPE_SELL if qty>0 else self.kite.TRANSACTION_TYPE_BUY
                     q = abs(qty)
                     try:
                         order = self.kite.place_order(
@@ -347,19 +351,19 @@ def handle_order_rejection(kite, order_id, trading_symbol):
                             product=self.kite.PRODUCT_MIS,
                             variety=self.kite.VARIETY_REGULAR
                         )
-                        closed.append({'symbol':p.get('tradingsymbol'), 'qty':q, 'order':order})
+                        closed.append({'symbol':p.get('tradingsymbol'),'qty':q,'order':order})
                     except Exception as e:
                         log(f"Failed to close {p.get('tradingsymbol')}: {e}")
                 log(f"Close orders placed: {closed}")
                 return closed
             except Exception as e:
-                log(f"Exit all positions error: {e}")
+                log(f"exit_all_positions error: {e}")
                 return []
 
     def run(self):
-        log("Engine started")
+        log("Engine thread started")
         cfg = self.cfg
-        exchange = cfg.get('exchange', 'NSE')
+        exchange = cfg.get('exchange','NSE')
         tradingsymbol = cfg.get('tradingsymbol')
         symbol_ref = f"{exchange}:{tradingsymbol}"
         sim_ltp = float(cfg.get('sim_ltp', 100.0))
@@ -367,42 +371,26 @@ def handle_order_rejection(kite, order_id, trading_symbol):
         instant_pct = float(cfg.get('instant_sl_pct', DEFAULT_INSTANT_SL_PCT))
         trail_pct = float(cfg.get('trail_pct', DEFAULT_TRAIL_PCT))
         start_time = cfg.get('start_time', DEFAULT_START_TIME)
-        squareoff = cfg.get('squareoff_time', DEFAULT_SQUAREOFF)
 
         first_candle_used = False
 
         while not self.stopped():
             try:
-                # skip weekends
                 now = local_now()
                 if now.weekday() >= 5:
                     time.sleep(5)
                     continue
 
-                # fetch candles (last 30 min: 6 candles)
-                df = pd.DataFrame()
-                if self.kite and cfg.get('instrument_token') and st.session_state.get("mode") == "Live":
-                    try:
-                        end = now
-                        start = end - timedelta(minutes=5*CANDLES_COUNT)
-                        data = self.kite.historical_data(int(cfg.get('instrument_token')), start, end, '5minute')
-                        df = pd.DataFrame(data)
-                    except Exception as e:
-                        log(f"OHLC fetch error: {e}")
-                        df = pd.DataFrame()
-                else:
+                # get last 6 candles (5-min) from session_state['chart_df'] if present, else simulate
+                df = st.session_state.get("chart_df", pd.DataFrame())
+                if df.empty:
                     base = sim_ltp
                     times = [now - timedelta(minutes=5*(CANDLES_COUNT - i)) for i in range(CANDLES_COUNT)]
-                    prices = base * (1 + np.random.normal(0, 0.0015, CANDLES_COUNT))
-                    df = pd.DataFrame({'date':times,'open':prices,'high':prices*(1+0.001),'low':prices*(1-0.001),'close':prices,'volume':np.random.randint(100,1000,CANDLES_COUNT)})
+                    prices = base * (1 + np.random.normal(0,0.0015,CANDLES_COUNT))
+                    df = pd.DataFrame({'time':times,'open':prices,'high':prices*(1+0.001),'low':prices*(1-0.001),'close':prices,'volume':np.random.randint(100,1000,CANDLES_COUNT)})
+                    st.session_state["chart_df"] = df
 
-                if not df.empty and 'volume' in df.columns:
-                    typical = (df['high'] + df['low'] + df['close'])/3.0
-                    df['cum_vol'] = df['volume'].cumsum()
-                    df['cum_vp'] = (typical * df['volume']).cumsum()
-                    df['vwap'] = df['cum_vp'] / df['cum_vol']
-
-                # get ltp
+                # determine ltp (live)
                 ltp = self.get_ltp(symbol_ref) or (df['close'].iloc[-1] if not df.empty else sim_ltp)
                 qty = self.compute_qty(ltp)
 
@@ -416,34 +404,66 @@ def handle_order_rejection(kite, order_id, trading_symbol):
                         if float(first_candle['close']) > float(first_candle['open']):
                             if ltp > float(first_candle['close']):
                                 if self.entry_price is None:
-                                    oid = self.place_buy(exchange, tradingsymbol, qty, ltp)
-                                    if oid is not None:
-                                        self.entry_price = ltp
-                                        self.qty = qty
-                                        self.entry_time = now
-                                        self.peak = ltp
-                                        self.instant_sl = round(self.entry_price * (1 - instant_pct/100), 2)
-                                        self.sl_trigger = round(self.entry_price * (1 - sl_pct/100), 2)
-                                        send_sms(f"BUY executed {tradingsymbol} @{self.entry_price} qty={self.qty} SL={self.sl_trigger} InstantSL={self.instant_sl}")
+                                    order_id = self.place_buy(exchange, tradingsymbol, qty, ltp)
+                                    # if place_buy returned None -> buy rejected/failed - do not retry
+                                    if order_id is not None:
+                                        # If live, wait a little and check rejection via orders API
+                                        if st.session_state.get("mode")=="Live" and self.kite:
+                                            time.sleep(2)
+                                            rejected = handle_order_rejection_and_cleanup(self.kite, order_id, tradingsymbol)
+                                            if rejected:
+                                                self.last_buy_order_id = None
+                                                # do not set entry_price
+                                            else:
+                                                self.entry_price = ltp
+                                                self.qty = qty
+                                                self.entry_time = now
+                                                self.peak = ltp
+                                                self.instant_sl = round(self.entry_price * (1 - instant_pct/100),2)
+                                                self.sl_trigger = round(self.entry_price * (1 - sl_pct/100),2)
+                                                send_sms(f"BUY executed {tradingsymbol} @{self.entry_price} qty={self.qty} SL={self.sl_trigger} InstantSL={self.instant_sl}")
+                                        else:
+                                            # paper - immediate fill
+                                            self.entry_price = ltp
+                                            self.qty = qty
+                                            self.entry_time = now
+                                            self.peak = ltp
+                                            self.instant_sl = round(self.entry_price * (1 - instant_pct/100),2)
+                                            self.sl_trigger = round(self.entry_price * (1 - sl_pct/100),2)
+                                            send_sms(f"[Paper] BUY executed {tradingsymbol} @{self.entry_price} qty={self.qty} SL={self.sl_trigger} InstantSL={self.instant_sl}")
                                         first_candle_used = True
 
                     # after 9:30 uptrend & above VWAP
                     if self.entry_price is None and now.time() > dtime(9,30):
                         try:
                             if float(latest['close']) > float(prev['close']) and float(latest['close']) > float(latest.get('vwap', -1)):
-                                oid = self.place_buy(exchange, tradingsymbol, qty, ltp)
-                                if oid is not None:
-                                    self.entry_price = ltp
-                                    self.qty = qty
-                                    self.entry_time = now
-                                    self.peak = ltp
-                                    self.instant_sl = round(self.entry_price * (1 - instant_pct/100), 2)
-                                    self.sl_trigger = round(self.entry_price * (1 - sl_pct/100), 2)
-                                    send_sms(f"BUY executed {tradingsymbol} @{self.entry_price} qty={self.qty} SL={self.sl_trigger} InstantSL={self.instant_sl}")
+                                order_id = self.place_buy(exchange, tradingsymbol, qty, ltp)
+                                if order_id is not None:
+                                    if st.session_state.get("mode")=="Live" and self.kite:
+                                        time.sleep(2)
+                                        rejected = handle_order_rejection_and_cleanup(self.kite, order_id, tradingsymbol)
+                                        if rejected:
+                                            self.last_buy_order_id = None
+                                        else:
+                                            self.entry_price = ltp
+                                            self.qty = qty
+                                            self.entry_time = now
+                                            self.peak = ltp
+                                            self.instant_sl = round(self.entry_price * (1 - instant_pct/100),2)
+                                            self.sl_trigger = round(self.entry_price * (1 - sl_pct/100),2)
+                                            send_sms(f"BUY executed {tradingsymbol} @{self.entry_price} qty={self.qty} SL={self.sl_trigger} InstantSL={self.instant_sl}")
+                                    else:
+                                        self.entry_price = ltp
+                                        self.qty = qty
+                                        self.entry_time = now
+                                        self.peak = ltp
+                                        self.instant_sl = round(self.entry_price * (1 - instant_pct/100),2)
+                                        self.sl_trigger = round(self.entry_price * (1 - sl_pct/100),2)
+                                        send_sms(f"[Paper] BUY executed {tradingsymbol} @{self.entry_price} qty={self.qty} SL={self.sl_trigger} InstantSL={self.instant_sl}")
                         except Exception as e:
                             log(f"After-9:30 logic error: {e}")
 
-                # POST-entry management
+                # Post-entry management
                 if self.entry_price is not None:
                     if ltp > self.peak:
                         self.peak = ltp
@@ -469,7 +489,7 @@ def handle_order_rejection(kite, order_id, trading_symbol):
                     profit_pct = (ltp - self.entry_price)/self.entry_price*100
                     if profit_pct >= (sl_pct * 3.0):
                         try:
-                            self.sl_trigger = round(self.entry_price, 2)
+                            self.sl_trigger = round(self.entry_price,2)
                             send_sms(f"Moved SL to breakeven for {tradingsymbol}")
                             log("Moved SL to breakeven")
                         except Exception as e:
@@ -482,21 +502,21 @@ def handle_order_rejection(kite, order_id, trading_symbol):
 
                 # auto square-off at 15:15
                 if now.time() >= dtime(15,15):
-                    log("Square-off: flattening positions")
-                    send_sms("Square-off time reached - flattening positions")
+                    log("Square-off reached - flattening")
+                    send_sms("Square-off reached - flattening positions")
                     self.cancel_all_orders()
                     self.exit_all_positions()
                     st.session_state["trading_active"] = False
                     break
 
-                # sleep small interval
+                # sleep
                 for _ in range(int(ENGINE_SLEEP/1)):
                     if self.stopped():
                         break
                     time.sleep(1)
 
             except Exception as e:
-                log(f"Engine loop error: {e}")
+                log(f"Engine error: {e}")
                 traceback.print_exc()
                 send_sms(f"Engine error: {e}")
                 try:
@@ -509,74 +529,64 @@ def handle_order_rejection(kite, order_id, trading_symbol):
 
         log("Engine ended")
 
-# -------------------- STREAMLIT UI & THREADS --------------------
-st.set_page_config(page_title="Auto Intraday Trader — PRO", layout="wide")
-# Dark theme CSS: keep inputs readable (white text on dark backgrounds; inputs remain default)
+# ------------------------- STREAMLIT UI -------------------------
+st.set_page_config(page_title="Auto Intraday Trader — Live Chart", layout="wide")
+# Minimal dark CSS
 st.markdown("""
 <style>
-/* App background and text */
-.stApp { background: #0b0f14; color: #e6eef6; }
-
-/* Headings/buttons bold and visible */
-h1, h2, h3, .big { color: #ffffff; font-weight:700; }
-
-/* Make sure labels on dark backgrounds are white bold */
-.label-dark { color: #ffffff; font-weight:700; }
-
-/* If any widget gets white background, make text black bold */
-input, .stButton { font-weight:700; color: #000000; }
-
-/* Logger area look */
-.logger-box { background:#071018; color:#d9e6f2; padding:8px; border-radius:6px; }
+.stApp { background: #071221; color: #e6eef6; }
+h1, h2, h3 { color: #ffffff; font-weight:700; }
+.label-dark { color:#ffffff; font-weight:700; }
+.stButton>button { font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🔁 Auto Intraday MIS Trader — PRO (IST)")
+st.title("🔁 Auto Intraday MIS Trader — Live Chart (5s)")
 
-# Sidebar: Kite + Fast2SMS
+# Sidebar for KITE & SMS
 with st.sidebar:
-    st.header("Connection & Alerts")
-    api_key = st.text_input("Kite API Key (paste or set env)", value=API_KEY_ENV, type="password")
-    api_secret = st.text_input("Kite API Secret", value=API_SECRET_ENV, type="password")
-    st.markdown("**Kite login (once/day)** — click URL -> login -> copy request_token from redirect -> paste below")
+    st.header("Kite & SMS")
+    api_key = st.text_input("Kite API Key (paste or set env)", value=os.getenv("ZK_API_KEY",""), type="password")
+    api_secret = st.text_input("Kite API Secret", value=os.getenv("ZK_API_SECRET",""), type="password")
+    st.markdown("1) Click the Kite login URL -> login -> copy request_token from redirect URL -> paste below")
     if KITE_AVAILABLE and api_key:
         try:
             temp = KiteConnect(api_key=api_key)
-            st.write("Kite Login URL (open in new tab):")
             st.code(temp.login_url())
         except Exception as e:
-            st.write("Kite login URL unavailable:", e)
+            st.write("Unable to build login URL:", e)
     else:
         if not KITE_AVAILABLE:
-            st.warning("kiteconnect not installed — Live mode disabled.")
-    request_token = st.text_input("Paste request_token (from Kite redirect)", value="")
+            st.warning("kiteconnect not installed; Live mode disabled.")
+    request_token = st.text_input("Paste request_token here", value="")
     if st.button("Generate & Save Access Token"):
         if not (api_key and api_secret and request_token):
-            st.error("Provide API Key, API Secret and request_token")
+            st.error("Provide API Key, Secret, and request_token")
         else:
             try:
                 tmp = KiteConnect(api_key=api_key)
                 data = tmp.generate_session(request_token.strip(), api_secret=api_secret.strip())
                 safe_save_json(ACCESS_TOKEN_FILE, data)
-                st.success("Saved access token")
+                st.success("Access token saved")
                 log("Access token saved")
-                send_sms("Access token generated and saved.")
+                send_sms("Access token generated & saved.")
             except Exception as e:
                 st.error(f"Token gen failed: {e}")
                 log(f"Token gen failed: {e}")
+
     st.markdown("---")
-    st.subheader("Fast2SMS (alerts)")
-    fastkey = st.text_input("Fast2SMS API Key (paste)", value=FAST2SMS_API_KEY_PLACEHOLDER, type="password")
-    sms_number = st.text_input("Alert mobile number (with country code, e.g., 9198...)", value=FAST2SMS_DEFAULT_NUMBER)
-    if st.button("Save SMS Settings"):
+    st.subheader("Fast2SMS Alerts")
+    fastkey = st.text_input("Fast2SMS API Key", value=FAST2SMS_API_KEY_PLACEHOLDER, type="password")
+    sms_number = st.text_input("Alert mobile (country code, e.g., 9198...)", value=FAST2SMS_DEFAULT_NUMBER)
+    if st.button("Save SMS settings to session"):
         st.session_state["fast2sms_key"] = fastkey
         st.session_state["sms_number"] = sms_number
-        st.success("SMS settings saved to session")
-        log("Fast2SMS settings saved")
+        st.success("SMS settings saved")
+        log("Fast2SMS settings saved in session")
 
-# Build Kite object if possible
-saved = safe_load_json(ACCESS_TOKEN_FILE)
-access_available = bool(saved and saved.get("access_token"))
+# Build kite client if token present
+saved_access = safe_load_json(ACCESS_TOKEN_FILE)
+access_available = bool(saved_access and saved_access.get("access_token"))
 kite = None
 kite_connected = False
 if KITE_AVAILABLE and api_key:
@@ -584,53 +594,53 @@ if KITE_AVAILABLE and api_key:
         kite = KiteConnect(api_key=api_key)
         if access_available:
             try:
-                kite.set_access_token(saved.get("access_token"))
+                kite.set_access_token(saved_access.get("access_token"))
                 kite.profile()
                 kite_connected = True
                 log("Kite connected from saved token")
             except Exception as e:
                 kite_connected = False
                 log(f"Kite token invalid/expired: {e}")
-                # alert by sms
+                # SMS notify token expiry if sms key present
                 if st.session_state.get("fast2sms_key"):
                     send_fast2sms("Kite access token invalid/expired. Please refresh.", st.session_state.get("fast2sms_key"), st.session_state.get("sms_number"))
     except Exception as e:
-        log(f"KiteConnect init error: {e}")
+        log(f"Kite init error: {e}")
 
-# Top row: indicators + digital clock
-col1, col2, col3 = st.columns([1,1,4])
-with col1:
+# Top bar: status + digital clock
+c1, c2, c3 = st.columns([1,1,4])
+with c1:
     st.markdown("**Kite**")
     if kite_connected:
         st.markdown("<span style='color:#00ff00; font-weight:700'>● Connected</span>", unsafe_allow_html=True)
     else:
         st.markdown("<span style='color:#ff3333; font-weight:700'>● Not connected</span>", unsafe_allow_html=True)
-with col2:
+with c2:
     st.markdown("**Access token**")
     if access_available:
         st.markdown("<span style='color:#00ff00; font-weight:700'>● Saved</span>", unsafe_allow_html=True)
     else:
         st.markdown("<span style='color:#ff3333; font-weight:700'>● Not saved</span>", unsafe_allow_html=True)
-with col3:
+with c3:
     clock_placeholder = st.empty()
-    def clock_loop():
+    def clock_worker():
         while True:
             try:
-                clock_placeholder.markdown(f"<h3 style='text-align:right; color:#ffffff; font-weight:700'>{local_now().strftime('%Y-%m-%d %H:%M:%S IST')}</h3>", unsafe_allow_html=True)
+                clock_placeholder.markdown(f"<h3 style='text-align:right; color:#00FFFF; font-weight:700'>{local_now().strftime('%Y-%m-%d %H:%M:%S IST')}</h3>", unsafe_allow_html=True)
             except:
                 pass
-            time.sleep(CLOCK_REFRESH_SEC)
+            time.sleep(CLOCK_UPDATE_SEC)
     if 'clock_thread' not in st.session_state:
-        st.session_state['clock_thread'] = threading.Thread(target=clock_loop, daemon=True)
+        st.session_state['clock_thread'] = threading.Thread(target=clock_worker, daemon=True)
         st.session_state['clock_thread'].start()
 
 st.markdown("---")
 
-# Main config (left) & controls (right)
+# Main layout: config + controls + chart/pnl
 left, right = st.columns([3,1])
 with left:
     st.subheader("Strategy Configuration")
-    mode = st.selectbox("Mode (Paper / Live)", ["Paper", "Live"], index=0)
+    mode = st.selectbox("Mode (Paper/ Live)", ["Paper", "Live"], index=0)
     st.session_state["mode"] = mode
     exchange = st.selectbox("Exchange", ["NSE", "BSE"], index=0)
     tradingsymbol = st.text_input("Trading symbol (exact)", value="RELIANCE").strip().upper()
@@ -642,8 +652,8 @@ with left:
     trail_pct = st.number_input("Trailing % after breakeven", value=DEFAULT_TRAIL_PCT, step=0.1)
     start_time = st.time_input("Auto-start time (IST)", value=DEFAULT_START_TIME)
     squareoff_time = st.time_input("Square-off time (IST)", value=DEFAULT_SQUAREOFF)
-    sim_ltp = st.number_input("Paper sim LTP (if Paper mode or missing LTP)", value=100.0)
-    auto_start = st.checkbox("Auto-start (when token present & within window)", value=False)
+    sim_ltp = st.number_input("Paper sim LTP", value=100.0)
+    auto_start = st.checkbox("Auto-start when token present", value=False)
 
 with right:
     st.subheader("Engine Controls")
@@ -667,6 +677,7 @@ with right:
         eng.start()
         log("Engine started (manual)")
         send_sms(f"Engine started for {tradingsymbol} mode={mode}")
+
     if st.button("Stop Engine (manual)"):
         eng = st.session_state.get("engine")
         st.session_state["trading_active"] = False
@@ -683,6 +694,7 @@ with right:
         log("Engine stop requested (manual)")
         send_sms("Engine stop requested (manual) - flattened")
         st.success("Engine stop requested and flatten attempted.")
+
     if st.button("Emergency STOP (flatten now)"):
         eng = st.session_state.get("engine")
         st.session_state["trading_active"] = False
@@ -696,76 +708,89 @@ with right:
             except:
                 pass
             eng.stop()
-        send_sms("Emergency STOP pressed — all orders cancelled and positions exited.")
+        send_sms("Emergency STOP pressed — all orders cancelled & positions exited.")
         log("Emergency STOP executed")
         st.error("Emergency STOP executed")
 
 st.markdown("---")
 
-# Chart and P&L layout
-col_chart, col_info = st.columns([3,1])
-with col_chart:
-    st.subheader("Live 5-min Candles (last 30 minutes)")
+# Left area: chart
+chart_col, info_col = st.columns([3,1])
+with chart_col:
+    st.subheader("Live 5-min Candle Chart (last 30 min) — auto updates every 5s")
     chart_placeholder = st.empty()
-with col_info:
+
+with info_col:
     st.subheader("Live P&L & Status")
     pnl_box = st.empty()
     status_box = st.empty()
     logs_box = st.empty()
 
-# Chart updater thread
+# Chart updater (background thread) — uses kite.ltp to update candles & plot
 def chart_updater():
+    # initialize chart_df if not present
+    if "chart_df" not in st.session_state:
+        now = local_now()
+        base = float(st.session_state.get("sim_ltp", sim_ltp))
+        times = [now - timedelta(minutes=5*(CANDLES_COUNT - i)) for i in range(CANDLES_COUNT)]
+        prices = base * (1 + np.random.normal(0,0.0015,CANDLES_COUNT))
+        st.session_state["chart_df"] = pd.DataFrame({'time':times,'open':prices,'high':prices*(1+0.001),'low':prices*(1-0.001),'close':prices,'volume':np.random.randint(100,1000,CANDLES_COUNT)})
     while True:
         try:
-            eng = st.session_state.get("engine")
-            cfg = {
-                'exchange': exchange,
-                'tradingsymbol': tradingsymbol,
-                'instrument_token': instrument_token,
-                'sim_ltp': sim_ltp
-            }
-            df = pd.DataFrame()
-            # Try engine's kite or global kite for OHLC
-            if eng and eng.kite and cfg.get('instrument_token') and st.session_state.get("mode") == "Live":
+            eng = st.session_state.get("engine")  # may be None
+            mode = st.session_state.get("mode","Paper")
+            # Ensure sim_ltp in session
+            st.session_state["sim_ltp"] = st.session_state.get("sim_ltp", sim_ltp)
+            # get current time bucket
+            now = local_now()
+            bucket = now.replace(second=0, microsecond=0, minute=(now.minute//5)*5)
+            df = st.session_state.get("chart_df", pd.DataFrame())
+            # get live price
+            ref = f"{st.session_state.get('mode','Paper') and ''}"  # dummy to avoid lint
+            ltp_val = None
+            if mode == "Live" and kite and tradingsymbol:
                 try:
-                    end = local_now()
-                    start = end - timedelta(minutes=5*CANDLES_COUNT)
-                    data = eng.kite.historical_data(int(cfg.get('instrument_token')), start, end, '5minute')
-                    df = pd.DataFrame(data)
+                    ref = f"{exchange}:{tradingsymbol}"
+                    d = kite.ltp(ref)
+                    ltp_val = list(d.values())[0]['last_price']
                 except Exception as e:
-                    log(f"Chart OHLC (engine) error: {e}")
-                    df = pd.DataFrame()
-            elif KITE_AVAILABLE and kite and cfg.get('instrument_token') and st.session_state.get("mode") == "Live":
-                try:
-                    end = local_now()
-                    start = end - timedelta(minutes=5*CANDLES_COUNT)
-                    data = kite.historical_data(int(cfg.get('instrument_token')), start, end, '5minute')
-                    df = pd.DataFrame(data)
-                except Exception as e:
-                    df = pd.DataFrame()
-            if df.empty:
-                # simulate candles
-                base = float(sim_ltp)
-                times = [local_now() - timedelta(minutes=5*(CANDLES_COUNT - i)) for i in range(CANDLES_COUNT)]
-                prices = base * (1 + np.random.normal(0, 0.0015, CANDLES_COUNT))
-                df = pd.DataFrame({'date':times, 'open':prices, 'high':prices*(1+0.001), 'low':prices*(1-0.001), 'close':prices, 'volume':np.random.randint(100,1000,CANDLES_COUNT)})
-            if 'date' in df.columns:
-                df = df.sort_values('date').tail(CANDLES_COUNT)
+                    log(f"chart_updater LTP error: {e}")
+                    ltp_val = None
+            if ltp_val is None:
+                # fallback to simulate using sim_ltp or last close
+                ltp_val = float(st.session_state.get("sim_ltp", sim_ltp)) * (1 + np.random.normal(0,0.0008))
+            # append/update candle
+            if not df.empty and df.iloc[-1]['time'] == bucket:
+                # update last candle
+                i = df.index[-1]
+                df.at[i,'high'] = max(df.at[i,'high'], ltp_val)
+                df.at[i,'low'] = min(df.at[i,'low'], ltp_val)
+                df.at[i,'close'] = ltp_val
+                df.at[i,'volume'] = df.at[i,'volume'] + 1
             else:
+                # new candle
+                new = {'time':bucket, 'open':ltp_val, 'high':ltp_val, 'low':ltp_val, 'close':ltp_val, 'volume':1}
+                df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
                 df = df.tail(CANDLES_COUNT)
+            # compute VWAP
             typical = (df['high'] + df['low'] + df['close'])/3.0
             df['cum_vol'] = df['volume'].cumsum()
             df['cum_vp'] = (typical * df['volume']).cumsum()
             df['vwap'] = df['cum_vp'] / df['cum_vol']
+            st.session_state["chart_df"] = df
 
-            fig = go.Figure(data=[go.Candlestick(x=df['date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='candles')])
-            fig.add_trace(go.Scatter(x=df['date'], y=df['vwap'], name='VWAP', mode='lines'))
+            # Build figure and render into placeholder
+            fig = go.Figure(data=[go.Candlestick(x=df['time'],
+                                                 open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+                                                 name='candles')])
+            fig.add_trace(go.Scatter(x=df['time'], y=df['vwap'], name='VWAP', mode='lines'))
+            # draw entry/SL lines from engine if present
             eng_local = st.session_state.get("engine")
             if eng_local:
-                ep = getattr(eng_local, 'entry_price', None)
-                et = getattr(eng_local, 'entry_time', None)
-                sl = getattr(eng_local, 'sl_trigger', None)
-                inst = getattr(eng_local, 'instant_sl', None)
+                ep = getattr(eng_local,'entry_price', None)
+                et = getattr(eng_local,'entry_time', None)
+                sl = getattr(eng_local,'sl_trigger', None)
+                inst = getattr(eng_local,'instant_sl', None)
                 if ep and et:
                     fig.add_trace(go.Scatter(x=[et], y=[ep], mode='markers', marker_symbol='triangle-up', marker_color='green', marker_size=12, name='BUY'))
                 if sl:
@@ -773,31 +798,35 @@ def chart_updater():
                 if inst:
                     fig.add_hline(y=inst, line_dash="dot", line_color="orange", annotation_text="Instant SL", annotation_position="top left")
             fig.update_layout(xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=30,b=10), height=520, template='plotly_dark')
-            chart_placeholder.plotly_chart(fig, use_container_width=True)
+            try:
+                chart_placeholder.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                log(f"chart placeholder render error: {e}")
 
-            # P&L & status
-            if eng_local and getattr(eng_local, 'entry_price', None):
-                ltp = eng_local.get_ltp(f"{eng_local.cfg.get('exchange','NSE')}:{eng_local.cfg.get('tradingsymbol')}")
-                if ltp is None:
-                    ltp = eng_local.entry_price
-                unreal = (ltp - eng_local.entry_price) * eng_local.qty
-                color = "green" if unreal > 0 else ("red" if unreal < 0 else "blue")
+            # P&L / status rendering
+            eng_local = st.session_state.get("engine")
+            if eng_local and getattr(eng_local,'entry_price', None):
+                ltp_now = eng_local.get_ltp(f"{eng_local.cfg.get('exchange','NSE')}:{eng_local.cfg.get('tradingsymbol')}")
+                if ltp_now is None:
+                    ltp_now = eng_local.entry_price
+                unreal = (ltp_now - eng_local.entry_price) * eng_local.qty
+                color = "green" if unreal>0 else ("red" if unreal<0 else "blue")
                 pnl_box.markdown(f"<h3 style='color:{color};'>Unreal P&L: ₹{unreal:.2f}</h3>", unsafe_allow_html=True)
                 status_box.markdown(f"Mode: **{st.session_state.get('mode')}**  \nSymbol: **{eng_local.cfg.get('tradingsymbol')}**  \nEntry: ₹{eng_local.entry_price}  \nQty: {eng_local.qty}")
             else:
-                # show kite positions in live
-                if KITE_AVAILABLE and kite and st.session_state.get("mode") == "Live":
+                # show kite positions for live
+                if KITE_AVAILABLE and kite and st.session_state.get("mode")=="Live":
                     try:
                         pos = kite.positions()
                         net = pos.get('net', []) if isinstance(pos, dict) else []
                         if net:
-                            total = 0.0
-                            rows = []
+                            total=0.0
+                            rows=[]
                             for p in net:
                                 q = int(p.get('quantity',0) or 0)
                                 pnl = float(p.get('pnl',0) or 0)
                                 total += pnl
-                                rows.append({'Symbol':p.get('tradingsymbol'), 'Qty':q, 'PnL':pnl})
+                                rows.append({'Symbol':p.get('tradingsymbol'),'Qty':q,'PnL':pnl})
                             color = "green" if total>0 else ("red" if total<0 else "blue")
                             pnl_box.markdown(f"<h3 style='color:{color};'>Total P&L: ₹{total:.2f}</h3>", unsafe_allow_html=True)
                             status_box.dataframe(pd.DataFrame(rows))
@@ -810,16 +839,20 @@ def chart_updater():
                 else:
                     pnl_box.text("No active position")
                     status_box.text("Mode: " + str(st.session_state.get("mode")))
-            logs_box.text_area("Logs", value="\n".join(st.session_state.get("logs", [])[-300:]), height=300)
+
+            # logs
+            logs_box.text_area("Logs", value="\n".join(st.session_state.get("logs", [])[-400:]), height=300)
+
         except Exception as e:
             log(f"chart_updater error: {e}")
-        time.sleep(CHART_REFRESH_SEC)
+        time.sleep(CHART_UPDATE_SEC)
 
+# start chart thread once
 if 'chart_thread' not in st.session_state:
     st.session_state['chart_thread'] = threading.Thread(target=chart_updater, daemon=True)
     st.session_state['chart_thread'].start()
 
-# -------------------- Auto-start logic --------------------
+# ------------------------- Auto-start logic -------------------------
 def maybe_auto_start():
     if auto_start and access_available and st.session_state.get("mode") == "Live" and kite:
         now = local_now()
@@ -849,7 +882,7 @@ try:
 except Exception:
     pass
 
-# -------------------- Safety Flatten Watchdog (15:20) --------------------
+# ------------------------- Safety flatten (15:20) -------------------------
 def safety_flatten():
     now = local_now()
     if now.time() >= dtime(15,20):
@@ -875,6 +908,4 @@ except Exception:
     pass
 
 st.markdown("---")
-st.caption("Test fully in Paper mode before going Live. For Live: paste request_token from Kite redirect (once/day) and Save Access Token. Replace Fast2SMS key & mobile in sidebar.")
-
-# EOF
+st.caption("Test thoroughly in Paper mode. For Live: generate access token, paste request_token, save. Replace Fast2SMS key & number in sidebar for SMS alerts.")
