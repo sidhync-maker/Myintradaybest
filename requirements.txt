@@ -5,3 +5,4 @@ numpy
 requests
 apscheduler
 selenium
+plotly.graph_objects
