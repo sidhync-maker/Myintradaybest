@@ -6,3 +6,4 @@ requests
 apscheduler
 selenium
 plotly
+pytz
