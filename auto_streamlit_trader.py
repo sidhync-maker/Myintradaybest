@@ -418,3 +418,4 @@ if allow_manual:
         if eng: eng.emergency_exit("Manual Stop"); stop_engine()
     if m3.button("🛑 Emergency Exit"):
         eng=st.session
+
