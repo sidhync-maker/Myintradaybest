@@ -1,13 +1,14 @@
-# auto_streamlit_trader_full.py
+# auto_streamlit_trader_full_whatsapp.py
 """
-Fully updated Streamlit trading app:
+🔁 Auto Streamlit Trader — Full Updated with WhatsApp Cloud API
+Features:
 - Auto 09:15 entry if bullish + uptrend
-- Initial SL 1%, trailing 3%
+- Initial SL 1%, Trailing SL 3%
 - Day-end 15:15 square-off
 - Paper & Live mode
-- WhatsApp Cloud API alerts (no Twilio)
-- Safe token handling
+- WhatsApp Cloud API alerts
 - Live P&L display
+- Safe token handling
 """
 
 import streamlit as st
@@ -18,7 +19,7 @@ import time
 import json
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
 try:
     from kiteconnect import KiteConnect
@@ -27,9 +28,7 @@ except ImportError:
 
 # -------------------- CONFIG --------------------
 ACCESS_TOKEN_FILE = "access_token.json"
-DEFAULT_NIFTY_TOKEN = "256265"
 DEFAULT_SL_PCT = 1.0
-TRIGGER_MULTIPLIER = 3.0
 TRAIL_PCT = 3.0
 DEFAULT_EXPOSURE = 50000
 DEFAULT_LEVERAGE = 5
@@ -65,24 +64,33 @@ class Logger:
         return "\n".join(self.logs)
 logger=Logger()
 
-# -------------------- WhatsApp Cloud API --------------------
-def send_whatsapp(message,phone_number):
-    token = st.secrets.get("WABA_TOKEN","YOUR_WABA_ACCESS_TOKEN")
-    phone_id = st.secrets.get("PHONE_ID","YOUR_PHONE_NUMBER_ID")
-    if token=="YOUR_WABA_ACCESS_TOKEN" or phone_id=="YOUR_PHONE_NUMBER_ID":
+# -------------------- WHATSAPP CLOUD API --------------------
+st.sidebar.header("WhatsApp Cloud API")
+whatsapp_token = st.sidebar.text_input("WABA Access Token", type="password")
+whatsapp_phone_id = st.sidebar.text_input("Phone Number ID")
+whatsapp_to = st.sidebar.text_input("Recipient Number", value="919876543210")
+
+def send_whatsapp(message, phone_number=None):
+    token = whatsapp_token
+    phone_id = whatsapp_phone_id
+    to_number = phone_number if phone_number else whatsapp_to
+
+    if not token or not phone_id:
         logger.add("WhatsApp API not configured")
         return
-    url=f"https://graph.facebook.com/v17.0/{phone_id}/messages"
-    payload={
-        "messaging_product":"whatsapp",
-        "to":phone_number,
-        "type":"text",
-        "text":{"body":message}
+
+    url = f"https://graph.facebook.com/v17.0/{phone_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "text",
+        "text": {"body": message}
     }
-    headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
     try:
-        r=requests.post(url,headers=headers,data=json.dumps(payload))
-        if r.status_code==200:
+        r = requests.post(url, headers=headers, data=json.dumps(payload))
+        if r.status_code == 200:
             logger.add(f"WhatsApp sent: {message}")
         else:
             logger.add(f"WhatsApp failed: {r.status_code} {r.text}")
@@ -158,12 +166,14 @@ class TradingEngine:
         self.peak_price=None
         self.active=False
         self._stop=threading.Event()
+    # compute quantity
     def compute_qty(self,ltp):
         if self.config.get('qty_mode')=='fixed':
             return int(self.config.get('qty',1000))
         exposure=float(self.config.get('exposure',DEFAULT_EXPOSURE))
         leverage=float(self.config.get('leverage',DEFAULT_LEVERAGE))
         return max(int((exposure*leverage)//ltp),1)
+    # get last traded price
     def get_ltp(self,exchange,symbol):
         if self.live and self.kite:
             try:
@@ -175,6 +185,7 @@ class TradingEngine:
         if self.entry_price:
             return round(self.entry_price*(1+np.random.normal(0,0.0015)),2)
         return None
+    # place market buy
     def place_market_buy(self,symbol,exchange,qty):
         if self.live and self.kite:
             try:
@@ -189,6 +200,7 @@ class TradingEngine:
                 return None
         else:
             return self.broker.place_market_buy(symbol,qty,price=self.config.get('sim_ltp'))
+    # place SLM
     def place_slm(self,symbol,exchange,qty,trigger):
         if self.live and self.kite:
             try:
@@ -203,6 +215,7 @@ class TradingEngine:
                 return None
         else:
             return self.broker.place_slm(symbol,qty,trigger)
+    # modify SLM
     def modify_slm(self,order_id,trigger_price):
         if self.live and self.kite:
             try:
@@ -213,6 +226,7 @@ class TradingEngine:
                 return False
         else:
             return self.broker.modify_order(order_id,trigger_price)
+    # cancel all
     def cancel_all_pending_orders(self):
         if self.live and self.kite:
             cancelled=[]
@@ -234,6 +248,7 @@ class TradingEngine:
             return cancelled
         else:
             return self.broker.cancel_all()
+    # close all positions
     def close_all_open_positions(self):
         if self.live and self.kite:
             closed=[]
@@ -259,14 +274,16 @@ class TradingEngine:
                 return []
         else:
             return self.broker.close_all_positions()
+    # emergency exit
     def emergency_exit(self,reason="emergency"):
         logger.add(f"Emergency exit: {reason}")
-        send_whatsapp(f"Emergency exit: {reason}",st.secrets.get("WHATSAPP_NUMBER","919876543210"))
+        send_whatsapp(f"Emergency exit: {reason}")
         self.cancel_all_pending_orders()
         self.close_all_open_positions()
         self.stop()
         self.active=False
         logger.add("Engine stopped after emergency exit")
+    # evaluate entry
     def evaluate_and_place_entry(self):
         cfg=self.config
         try:
@@ -284,11 +301,12 @@ class TradingEngine:
             sl_oid=self.place_slm(cfg['tradingsymbol'],cfg['exchange'],qty,trigger)
             self.sl_order_id=sl_oid
             logger.add(f"Entry executed @ {self.entry_price} qty={self.qty} sl={trigger}")
-            send_whatsapp(f"Entry: {cfg['tradingsymbol']}@{self.entry_price} qty={self.qty} SL:{trigger}",st.secrets.get("WHATSAPP_NUMBER","919876543210"))
+            send_whatsapp(f"Entry: {cfg['tradingsymbol']}@{self.entry_price} qty={self.qty} SL:{trigger}")
             return True
         except Exception as e:
             logger.add(f"Entry exception: {e}")
             return False
+    # trailing SL
     def manage_trailing(self):
         if not self.entry_price: return
         ltp=self.get_ltp(self.config['exchange'],self.config['tradingsymbol'])
@@ -298,16 +316,17 @@ class TradingEngine:
             self.emergency_exit(reason="SL hit")
             return
         profit_pct=(ltp-self.entry_price)/self.entry_price*100
-        if profit_pct>=self.config['sl_pct']*TRIGGER_MULTIPLIER:
+        if profit_pct>=self.config['sl_pct']*3:
             breakeven=round(self.entry_price,2)
             if self.sl_order_id:
                 self.modify_slm(self.sl_order_id,breakeven)
                 logger.add(f"Moved SL to breakeven @ {breakeven}")
-                send_whatsapp(f"SL moved to breakeven for {self.config['tradingsymbol']}",st.secrets.get("WHATSAPP_NUMBER","919876543210"))
+                send_whatsapp(f"SL moved to breakeven for {self.config['tradingsymbol']}")
         trailing_trigger=round(self.peak_price*(1-TRAIL_PCT/100),2)
         if self.sl_order_id:
             self.modify_slm(self.sl_order_id,trailing_trigger)
             logger.add(f"Updated trailing SL -> {trailing_trigger} (peak {self.peak_price})")
+    # main loop
     def run_forever(self):
         logger.add("Engine loop started")
         self.active=True
@@ -336,9 +355,9 @@ class TradingEngine:
 
 # -------------------- STREAMLIT UI --------------------
 st.set_page_config(page_title="Auto Trader Full", layout="wide")
-st.title("🔁 Auto Streamlit Trader — Full Updated")
+st.title("🔁 Auto Streamlit Trader — Full Updated with WhatsApp")
 
-# Sidebar
+# Sidebar connection
 st.sidebar.header("Connection & Mode")
 live_mode=st.sidebar.checkbox("Live mode",value=False)
 api_key=st.sidebar.text_input("Kite API Key", type="password")
@@ -370,7 +389,7 @@ if live_mode:
             st.sidebar.success("Kite connected")
         except: pass
 
-# Config
+# Strategy Config
 st.subheader("Strategy Configuration")
 tradingsymbol=st.text_input("Trading symbol","INFY")
 exchange=st.selectbox("Exchange",["NSE","BSE"])
@@ -413,9 +432,4 @@ def stop_engine():
 if allow_manual:
     m1,m2,m3=st.columns([1,1,2])
     if m1.button("Manual Start"): start_engine()
-    if m2.button("Manual Stop"):
-        eng=st.session_state.get('engine')
-        if eng: eng.emergency_exit("Manual Stop"); stop_engine()
-    if m3.button("🛑 Emergency Exit"):
-        eng=st.session
-
+    if
