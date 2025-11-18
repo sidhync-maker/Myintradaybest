@@ -1,6 +1,6 @@
-# auto_streamlit_trader_full_fixed.py
+# auto_streamlit_trader_full_ready.py
 """
-Auto Streamlit Trader — Full Fixed Version
+Auto Streamlit Trader — Full Ready Version
 Features:
 - Auto 09:15 entry if bullish + uptrend
 - Initial SL 1%, Trailing SL 3%
@@ -153,11 +153,210 @@ class PaperBroker:
         return res
 
 # -------------------- TRADING ENGINE --------------------
-# ... [Include TradingEngine class code from previous version without changes] ...
+class TradingEngine:
+    def __init__(self,kite=None,broker=None,live=False,config=None):
+        self.kite=kite
+        self.broker=broker
+        self.live=live and (kite is not None)
+        self.config=config or {}
+        self.entry_price=None
+        self.qty=0
+        self.sl_order_id=None
+        self.entry_order_id=None
+        self.peak_price=None
+        self.active=False
+        self._stop=threading.Event()
+
+    def compute_qty(self,ltp):
+        if self.config.get('qty_mode')=='fixed':
+            return int(self.config.get('qty',1000))
+        exposure=float(self.config.get('exposure',DEFAULT_EXPOSURE))
+        leverage=float(self.config.get('leverage',DEFAULT_LEVERAGE))
+        return max(int((exposure*leverage)//ltp),1)
+
+    def get_ltp(self,exchange,symbol):
+        if self.live and self.kite:
+            try:
+                ref=f"{exchange}:{symbol}"
+                d=self.kite.ltp(ref)
+                return list(d.values())[0]['last_price']
+            except:
+                return None
+        if self.entry_price:
+            return round(self.entry_price*(1+np.random.normal(0,0.0015)),2)
+        return None
+
+    def place_market_buy(self,symbol,exchange,qty):
+        if self.live and self.kite:
+            try:
+                oid=self.kite.place_order(tradingsymbol=symbol,exchange=exchange,
+                    transaction_type=self.kite.TRANSACTION_TYPE_BUY,
+                    quantity=qty,order_type=self.kite.ORDER_TYPE_MARKET,
+                    product=self.kite.PRODUCT_MIS,variety=self.kite.VARIETY_REGULAR)
+                logger.add(f"[Live] Market BUY placed id={oid}")
+                return oid
+            except Exception as e:
+                logger.add(f"[Live] Market buy failed: {e}")
+                return None
+        else:
+            return self.broker.place_market_buy(symbol,qty,price=self.config.get('sim_ltp'))
+
+    def place_slm(self,symbol,exchange,qty,trigger):
+        if self.live and self.kite:
+            try:
+                oid=self.kite.place_order(tradingsymbol=symbol,exchange=exchange,
+                    transaction_type=self.kite.TRANSACTION_TYPE_SELL,
+                    quantity=qty,order_type=self.kite.ORDER_TYPE_SLM,
+                    trigger_price=trigger,product=self.kite.PRODUCT_MIS,variety=self.kite.VARIETY_REGULAR)
+                logger.add(f"[Live] SLM placed id={oid} trigger={trigger}")
+                return oid
+            except Exception as e:
+                logger.add(f"[Live] SL placement failed: {e}")
+                return None
+        else:
+            return self.broker.place_slm(symbol,qty,trigger)
+
+    def modify_slm(self,order_id,trigger_price):
+        if self.live and self.kite:
+            try:
+                self.kite.modify_order(order_id=order_id,trigger_price=trigger_price)
+                logger.add(f"[Live] Modified SL {order_id} -> {trigger_price}")
+                return True
+            except:
+                return False
+        else:
+            return self.broker.modify_order(order_id,trigger_price)
+
+    def cancel_all_pending_orders(self):
+        if self.live and self.kite:
+            cancelled=[]
+            try:
+                orders=self.kite.orders()
+                for o in orders:
+                    status=(o.get('status') or "").upper()
+                    oid=o.get('order_id')
+                    if status in ('OPEN','TRIGGER PENDING','PENDING'):
+                        try:
+                            variety=o.get('variety',self.kite.VARIETY_REGULAR)
+                            self.kite.cancel_order(order_id=oid,variety=variety)
+                            cancelled.append(oid)
+                        except:
+                            pass
+                logger.add(f"[Live] Cancelled orders: {cancelled}")
+            except:
+                pass
+            return cancelled
+        else:
+            return self.broker.cancel_all()
+
+    def close_all_open_positions(self):
+        if self.live and self.kite:
+            closed=[]
+            try:
+                pos=self.kite.positions()
+                net=pos.get('net',[]) if isinstance(pos,dict) else []
+                for p in net:
+                    tsym=p.get('tradingsymbol')
+                    exch=p.get('exchange') or 'NSE'
+                    qty=int(p.get('quantity',0) or 0)
+                    if qty==0: continue
+                    tx=self.kite.TRANSACTION_TYPE_SELL if qty>0 else self.kite.TRANSACTION_TYPE_BUY
+                    qty=abs(qty)
+                    try:
+                        order=self.kite.place_order(tradingsymbol=tsym,exchange=exch,
+                            transaction_type=tx,quantity=qty,order_type=self.kite.ORDER_TYPE_MARKET,
+                            product=self.kite.PRODUCT_MIS,variety=self.kite.VARIETY_REGULAR)
+                        closed.append({'symbol':tsym,'qty':qty,'order_id':order})
+                    except:
+                        pass
+                return closed
+            except:
+                return []
+        else:
+            return self.broker.close_all_positions()
+
+    def emergency_exit(self,reason="emergency"):
+        logger.add(f"Emergency exit: {reason}")
+        send_whatsapp(f"Emergency exit: {reason}")
+        self.cancel_all_pending_orders()
+        self.close_all_open_positions()
+        self.stop()
+        self.active=False
+        logger.add("Engine stopped after emergency exit")
+
+    def evaluate_and_place_entry(self):
+        cfg=self.config
+        try:
+            ltp=self.get_ltp(cfg['exchange'],cfg['tradingsymbol'])
+            qty=self.compute_qty(ltp)
+            if qty<=0:
+                return False
+            entry_oid=self.place_market_buy(cfg['tradingsymbol'],cfg['exchange'],qty)
+            if not entry_oid: return False
+            self.entry_order_id=entry_oid
+            self.entry_price=ltp
+            self.qty=qty
+            self.peak_price=ltp
+            trigger=round(self.entry_price*(1-cfg['sl_pct']/100),2)
+            sl_oid=self.place_slm(cfg['tradingsymbol'],cfg['exchange'],qty,trigger)
+            self.sl_order_id=sl_oid
+            logger.add(f"Entry executed @ {self.entry_price} qty={self.qty} sl={trigger}")
+            send_whatsapp(f"Entry: {cfg['tradingsymbol']}@{self.entry_price} qty={self.qty} SL:{trigger}")
+            return True
+        except Exception as e:
+            logger.add(f"Entry exception: {e}")
+            return False
+
+    def manage_trailing(self):
+        if not self.entry_price: return
+        ltp=self.get_ltp(self.config['exchange'],self.config['tradingsymbol'])
+        if ltp is None: return
+        if self.peak_price is None or ltp>self.peak_price: self.peak_price=ltp
+        if ltp<=self.entry_price*(1-self.config['sl_pct']/100):
+            self.emergency_exit(reason="SL hit")
+            return
+        profit_pct=(ltp-self.entry_price)/self.entry_price*100
+        if profit_pct>=self.config['sl_pct']*3:
+            breakeven=round(self.entry_price,2)
+            if self.sl_order_id:
+                self.modify_slm(self.sl_order_id,breakeven)
+                logger.add(f"Moved SL to breakeven @ {breakeven}")
+                send_whatsapp(f"SL moved to breakeven for {self.config['tradingsymbol']}")
+        trailing_trigger=round(self.peak_price*(1-TRAIL_PCT/100),2)
+        if self.sl_order_id:
+            self.modify_slm(self.sl_order_id,trailing_trigger)
+            logger.add(f"Updated trailing SL -> {trailing_trigger} (peak {self.peak_price})")
+
+    def run_forever(self):
+        logger.add("Engine loop started")
+        self.active=True
+        self._stop.clear()
+        while not self._stop.is_set():
+            try:
+                now=datetime.now()
+                if now.weekday()>=5: time.sleep(10); continue
+                if not self.entry_price and now.hour==9 and now.minute==15 and now.second<10:
+                    logger.add("09:15 -> evaluating entry")
+                    self.evaluate_and_place_entry()
+                else:
+                    self.manage_trailing()
+                if now.hour==15 and now.minute>=15:
+                    logger.add("15:15 -> day-end square-off")
+                    self.emergency_exit(reason="Time 15:15")
+                    break
+            except Exception as e:
+                logger.add(f"Engine loop error: {e}")
+            time.sleep(3)
+        logger.add("Engine loop ended")
+        self.active=False
+
+    def stop(self):
+        self._stop.set()
+        logger.add("Engine stop requested")
 
 # -------------------- STREAMLIT UI --------------------
 st.set_page_config(page_title="Auto Trader Full", layout="wide")
-st.title("🔁 Auto Streamlit Trader — Full Updated with WhatsApp")
+st.title("🔁 Auto Streamlit Trader — Full Ready Version")
 
 # Sidebar connection
 st.sidebar.header("Connection & Mode")
@@ -214,7 +413,7 @@ config={'tradingsymbol':tradingsymbol,'exchange':exchange,
         'qty':int(qty),'exposure':float(exposure),'leverage':float(leverage),
         'sl_pct':float(sl_pct),'sim_ltp':100.0}
 
-# Manual buttons (fixed syntax)
+# Manual buttons
 def start_engine():
     if st.session_state.get('engine') is not None:
         logger.add("Engine already running"); return
@@ -240,19 +439,4 @@ if allow_manual:
             eng.emergency_exit("Manual Stop")
             stop_engine()
     if m3.button("🛑 Emergency Exit"):
-        eng = st.session_state.get('engine')
-        if eng:
-            eng.emergency_exit("Emergency Exit")
-            stop_engine()
-
-# -------------------- Logs & P&L --------------------
-st.subheader("Logs")
-st.text_area("Logger Output", value=logger.get(), height=300)
-
-st.subheader("Positions / P&L")
-positions=broker.get_positions()
-if positions:
-    df=pd.DataFrame(positions)
-    st.dataframe(df)
-else:
-    st.write("No open positions.")
+        eng = st.session_state.get('
